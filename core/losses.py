@@ -155,6 +155,7 @@ class CLIPVisionWrapper(nn.Module):
         self.device = device
         self._model = None
         self._preprocess = None
+        self._backend = None  # "open_clip" or "hf"
 
         try:
             # Try open_clip (supports ViT-H/14)
@@ -164,6 +165,7 @@ class CLIPVisionWrapper(nn.Module):
             )
             self._model = model.visual.to(device).eval()
             self._input_size = 224
+            self._backend = "open_clip"
 
             for p in self._model.parameters():
                 p.requires_grad = False
@@ -178,6 +180,7 @@ class CLIPVisionWrapper(nn.Module):
                     "openai/clip-vit-large-patch14"
                 ).to(device).eval()
                 self._input_size = 224
+                self._backend = "hf"
 
                 for p in self._model.parameters():
                     p.requires_grad = False
@@ -221,8 +224,8 @@ class CLIPVisionWrapper(nn.Module):
         x = (x - self.clip_mean.to(x.device)) / self.clip_std.to(x.device)
 
         # Extract features
-        if hasattr(self._model, 'encode_image'):
-            # open_clip style
+        if self._backend == "open_clip":
+            # open_clip VisionTransformer: positional arg
             emb = self._model(x)
         else:
             # HuggingFace style

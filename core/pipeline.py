@@ -117,7 +117,7 @@ class ProtectionPipeline:
             jpeg_quality_range=cfg.jpeg_quality_range,
             resize_scale_range=cfg.resize_scale_range,
             gaussian_sigma_range=cfg.gaussian_sigma_range,
-        )
+        ).to(device)
 
         # 5. Unified loss
         self.loss_fn = PrivacyShieldLoss(
@@ -363,17 +363,21 @@ class ProtectionPipeline:
             if self.clip_model.is_available:
                 clean_clip = self.clip_model(aligned_clean)
 
-        # Semantic mask on full image
+        # Full-image mode: skip semantic mask (it's designed for 112x112 faces,
+        # not full photos). The grid_sample warp naturally restricts perturbation
+        # to the face region through gradient sparsity.
         mask = None
-        if self.semantic_mask is not None:
-            with torch.no_grad():
-                mask = self.semantic_mask(x)
 
         # Initialize delta in full image space
         delta = torch.empty_like(x).uniform_(-cfg.epsilon, cfg.epsilon)
-        if mask is not None:
-            delta = delta * mask
         delta.requires_grad_(True)
+
+        # EoT samples per step — use what the user configured
+        eot_n = cfg.eot_samples
+
+        if cfg.verbose:
+            print(f"  protect_full: eps={cfg.epsilon:.4f}, step_size={cfg.step_size:.4f}, "
+                  f"steps={cfg.num_steps}, eot={eot_n}, image={x.shape}")
 
         start_time = time.time()
         iterator = range(cfg.num_steps)
@@ -381,34 +385,63 @@ class ProtectionPipeline:
             iterator = tqdm(iterator, desc="Full-image PGD", leave=False)
 
         for step in iterator:
-            delta_eff = delta * mask if mask is not None else delta
-            x_adv = (x + delta_eff).clamp(0.0, 1.0)
+            x_adv = (x + delta).clamp(0.0, 1.0)
 
             # Differentiable warp → aligned face
             aligned_adv = self.aligner.warp(x_adv, grid)
 
-            # EoT + unified loss on aligned face
+            # EoT-averaged arcface + clip distance loss
+            # (skip LPIPS/L1 reg — they fight the attack in full-image mode)
             total_loss = torch.tensor(0.0, device=self.device)
-            for _ in range(cfg.eot_samples):
+            for _ in range(eot_n):
                 x_t = self.eot.apply_random_transform(aligned_adv)
-                loss_t, _ = self.loss_fn(aligned_clean, x_t, clean_arcface, clean_clip)
-                total_loss = total_loss + loss_t
+                adv_emb = self.face_model(x_t)
+                cos_sim = F.cosine_similarity(clean_arcface, adv_emb, dim=1).mean()
+                sample_loss = cos_sim
+                if self.clip_model.is_available and clean_clip is not None:
+                    adv_clip = self.clip_model(x_t)
+                    if adv_clip is not None:
+                        clip_cos = F.cosine_similarity(clean_clip, adv_clip, dim=1).mean()
+                        sample_loss = sample_loss + cfg.beta_clip * clip_cos
+                total_loss = total_loss + sample_loss
 
-            avg_loss = total_loss / cfg.eot_samples
-            avg_loss.backward()  # Gradients flow through grid_sample!
+            avg_loss = total_loss / eot_n
+            avg_loss.backward()
+
+            if delta.grad is None:
+                if cfg.verbose:
+                    print(f"  [WARN] Step {step}: delta.grad is None!")
+                break
 
             with torch.no_grad():
-                delta.data -= cfg.step_size * delta.grad.sign()
+                # Use normalized gradient instead of sign for smoother perturbations
+                # (sign creates salt-and-pepper noise that grid_sample averages out)
+                grad = delta.grad
+                grad_norm = grad.norm()
+                if grad_norm > 1e-10:
+                    # Normalized gradient step: same L2 magnitude as sign gradient
+                    # but spatially smoother — crucial for grid_sample
+                    normalized_grad = grad / grad_norm * grad.numel() ** 0.5
+                    delta.data -= cfg.step_size * normalized_grad
+                else:
+                    delta.data -= cfg.step_size * grad.sign()
+
                 delta.data = delta.data.clamp(-cfg.epsilon, cfg.epsilon)
-                if mask is not None:
-                    delta.data = delta.data * mask
                 delta.data = (x + delta.data).clamp(0.0, 1.0) - x
+
+                if cfg.verbose and (step == 0 or step == cfg.num_steps - 1 or step % 10 == 0):
+                    test_adv = (x + delta.data).clamp(0, 1)
+                    test_aligned = self.aligner.warp(test_adv, grid)
+                    test_emb = self.face_model(test_aligned)
+                    cur_cos = F.cosine_similarity(clean_arcface, test_emb, dim=1).mean().item()
+                    print(f"  Step {step}: loss={avg_loss.item():.4f}, "
+                          f"cos_sim={cur_cos:.4f}, "
+                          f"delta_linf={delta.data.abs().max().item():.4f}")
 
             delta.grad.zero_()
 
-        # Final
-        delta_eff = delta.data * mask if mask is not None else delta.data
-        x_protected = (x + delta_eff).clamp(0.0, 1.0)
+        # Final: apply delta directly (no mask in full-image mode)
+        x_protected = (x + delta.data).clamp(0.0, 1.0)
         elapsed = time.time() - start_time
 
         with torch.no_grad():
@@ -416,9 +449,10 @@ class ProtectionPipeline:
             prot_emb = self.face_model(aligned_prot)
             cos_sim = F.cosine_similarity(clean_arcface, prot_emb, dim=1).mean().item()
 
+        delta_final = x_protected - x
         metrics = {
             "arcface_cos_sim": cos_sim,
-            "delta_linf": delta_eff.abs().max().item(),
+            "delta_linf": delta_final.abs().max().item(),
             "processing_time_s": elapsed,
         }
 

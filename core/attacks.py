@@ -183,10 +183,10 @@ class PGDAttack:
         if self.verbose:
             print(f"\n{'='*50}")
             print(f"PGD Attack Complete")
-            print(f"  Clean→Adv cosine sim: {final_cos:.4f}")
-            print(f"  Robust cosine sim:    {robust_cos:.4f}")
-            print(f"  δ L∞ norm:            {info['delta_linf']:.4f}")
-            print(f"  δ L2 norm:            {info['delta_l2']:.4f}")
+            print(f"  Clean->Adv cosine sim: {final_cos:.4f}")
+            print(f"  Robust cosine sim:     {robust_cos:.4f}")
+            print(f"  delta L-inf norm:      {info['delta_linf']:.4f}")
+            print(f"  delta L2 norm:         {info['delta_l2']:.4f}")
             print(f"{'='*50}")
 
         return x_adv.detach(), info

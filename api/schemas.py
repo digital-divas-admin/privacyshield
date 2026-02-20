@@ -51,3 +51,52 @@ class BatchProtectRequest(BaseModel):
     epsilon: float = Field(default=8/255, ge=0, le=0.1)
     steps: int = Field(default=50, ge=1, le=500)
     eot_samples: int = Field(default=10, ge=1, le=50)
+
+
+# ---------------------------------------------------------------------------
+# Evaluate / Robustness schemas
+# ---------------------------------------------------------------------------
+
+class TransformResult(BaseModel):
+    """Result for a single transform condition."""
+    category: str = Field(description="Transform category: clean, jpeg, resize, blur, combined, platform")
+    name: str = Field(description="Human-readable condition name")
+    params: dict = Field(default_factory=dict, description="Transform parameters")
+    cosine_similarity: float = Field(description="Cosine similarity after transform")
+    is_match: bool = Field(description="Whether face recognition still matches (cos_sim > threshold)")
+    protection_holds: bool = Field(description="Whether protection survives this transform (cos_sim < threshold)")
+
+
+class EvaluateResponse(BaseModel):
+    """Response from /evaluate endpoint."""
+    threshold: float = Field(default=0.3, description="Cosine similarity threshold for protection")
+    overall_pass: bool = Field(description="True if protection holds across ALL conditions")
+    pass_count: int = Field(description="Number of conditions where protection holds")
+    total_count: int = Field(description="Total number of conditions tested")
+    perturbation_linf: float = Field(description="L∞ norm of perturbation")
+    perturbation_l2: float = Field(description="L2 norm of perturbation")
+    psnr: float = Field(description="Peak Signal-to-Noise Ratio in dB")
+    results: List[TransformResult] = Field(description="Per-condition results")
+
+
+class BatchProtectResult(BaseModel):
+    """Result for a single image in a batch protect request."""
+    index: int
+    success: bool
+    protected_image_b64: Optional[str] = None
+    error: Optional[str] = None
+    mode: str = ""
+    arcface_cos_sim: float = 0.0
+    clip_cos_sim: float = 0.0
+    lpips: float = 0.0
+    psnr: float = 0.0
+    delta_linf: float = 0.0
+    processing_time_ms: float = 0.0
+
+
+class BatchProtectResponse(BaseModel):
+    """Response from /protect/batch endpoint."""
+    total: int
+    succeeded: int
+    failed: int
+    results: List[BatchProtectResult]

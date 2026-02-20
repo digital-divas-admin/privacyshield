@@ -236,12 +236,15 @@ class FaceEmbedder(nn.Module):
         embedding_dim: int = 512,
     ):
         super().__init__()
-        self.backbone = IResNet100(embedding_dim=embedding_dim)
+        # Official ArcFace iresnet100 weights don't include SE blocks
+        self.backbone = IResNet100(embedding_dim=embedding_dim, use_se=False)
         self.device = device
         self.aligner = FaceAligner()
 
         if weights_path is not None:
-            state = torch.load(weights_path, map_location=device)
+            state = torch.load(weights_path, map_location=device, weights_only=True)
+            # Remap keys from official InsightFace naming to ours
+            state = self._remap_state_dict(state)
             self.backbone.load_state_dict(state, strict=False)
             print(f"Loaded ArcFace weights from {weights_path}")
         else:
@@ -277,6 +280,19 @@ class FaceEmbedder(nn.Module):
         # (112, 112, 3) uint8 RGB -> (1, 3, 112, 112) float [0,1]
         tensor = torch.from_numpy(aligned).float().permute(2, 0, 1) / 255.0
         return tensor.unsqueeze(0).to(self.device)
+
+    @staticmethod
+    def _remap_state_dict(state: dict) -> dict:
+        """Remap official InsightFace arcface_torch key names to ours."""
+        remapped = {}
+        for k, v in state.items():
+            new_key = k
+            if k == "prelu.weight":
+                new_key = "prelu1.weight"
+            elif k.startswith("features."):
+                new_key = k.replace("features.", "bn3.")
+            remapped[new_key] = v
+        return remapped
 
     def cosine_similarity(self, emb1: torch.Tensor, emb2: torch.Tensor) -> torch.Tensor:
         """Cosine similarity between two embedding batches."""
