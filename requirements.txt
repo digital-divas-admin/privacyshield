@@ -1,0 +1,18 @@
+torch>=2.0.0
+torchvision>=0.15.0
+insightface>=0.7.3
+onnxruntime-gpu>=1.15.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+Pillow>=10.0.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+kornia>=0.7.0
+tqdm>=4.65.0
+pydantic>=2.0.0
+
+# v2 pipeline (optional but recommended)
+lpips>=0.1.4                # Perceptual loss — gold standard
+open_clip_torch>=2.20.0     # CLIP ViT-H/14 for dual-targeting
+# transformers>=4.30.0      # Fallback CLIP backend (if open_clip unavailable)
