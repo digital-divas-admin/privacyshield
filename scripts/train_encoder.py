@@ -594,6 +594,8 @@ def train_v2_e2e(args):
                     # Compute semantic mask (no grad, fixed per batch)
                     mask = semantic_mask(clean) if semantic_mask is not None else None
 
+                optimizer.zero_grad()
+
                 with torch.cuda.amp.autocast(enabled=use_amp):
                     # Generate perturbation
                     delta = encoder(clean)
@@ -604,27 +606,29 @@ def train_v2_e2e(args):
 
                     x_adv = (clean + delta).clamp(0, 1)
 
-                    # EoT-averaged unified loss
-                    total_loss = torch.tensor(0.0, device=device)
-                    step_metrics = {}
-
-                    for _ in range(args.eot_samples):
+                # Per-sample backward to avoid holding all EoT graphs in memory
+                step_metrics = {}
+                loss_sum = 0.0
+                for s in range(args.eot_samples):
+                    with torch.cuda.amp.autocast(enabled=use_amp):
                         x_t = eot.apply_random_transform(x_adv)
                         loss_t, metrics_t = unified_loss(clean, x_t, clean_arcface, clean_clip)
-                        total_loss = total_loss + loss_t
-                        step_metrics = metrics_t  # Keep last sample's metrics
+                        scaled_loss = loss_t / args.eot_samples
 
-                    avg_loss = total_loss / args.eot_samples
+                    scaler.scale(scaled_loss).backward(
+                        retain_graph=(s < args.eot_samples - 1)
+                    )
+                    loss_sum += loss_t.item()
+                    step_metrics = metrics_t
 
-                optimizer.zero_grad()
-                scaler.scale(avg_loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(encoder.parameters(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
 
+                avg_loss_val = loss_sum / args.eot_samples
                 bs = clean.shape[0]
-                running["loss"] += avg_loss.item() * bs
+                running["loss"] += avg_loss_val * bs
                 running["arcface"] += step_metrics.get("arcface_cos_sim", 0) * bs
                 running["clip"] += step_metrics.get("clip_cos_sim", 0) * bs
                 running["lpips"] += step_metrics.get("lpips", 0) * bs

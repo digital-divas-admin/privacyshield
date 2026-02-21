@@ -48,7 +48,7 @@ python scripts/train_encoder.py --phase v2_e2e \
     --encoder-type unet --data-dir "$DATA_DIR" \
     --checkpoint "$CKPT_DIR/distill_best.pt" \
     --use-mask --epochs "$EPOCHS" --checkpoint-dir "$CKPT_DIR" \
-    --batch-size 4
+    --batch-size 2
 echo "U-Net v2_e2e done: $(date)"
 
 # Phase 3: ViT distill
