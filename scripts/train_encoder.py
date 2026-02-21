@@ -202,7 +202,7 @@ def generate_pairs(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     face_model = FaceEmbedder(weights_path=args.arcface_weights, device=device)
-    eot = EoTWrapper(model=face_model, num_samples=args.eot_samples)
+    eot = EoTWrapper(model=face_model, num_samples=args.eot_samples).to(device)
     attack = PGDAttack(
         face_model=face_model,
         eot_wrapper=eot,
@@ -378,7 +378,7 @@ def train_e2e(args):
         enable_resize=True,
         enable_gaussian=True,
         enable_crop=False,
-    )
+    ).to(device)
 
     # Load encoder from Phase 1
     encoder, image_size = create_encoder(args.encoder_type, args.epsilon, device)
@@ -509,7 +509,7 @@ def train_v2_e2e(args):
     lpips_loss = LPIPSLoss(device=device)
 
     print("Loading EoT wrapper...")
-    eot = EoTWrapper(model=face_model, num_samples=args.eot_samples)
+    eot = EoTWrapper(model=face_model, num_samples=args.eot_samples).to(device)
 
     # Unified loss
     unified_loss = PrivacyShieldLoss(

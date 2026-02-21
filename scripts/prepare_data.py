@@ -2,7 +2,7 @@
 Download and prepare face datasets for PrivacyShield encoder training.
 
 Supports:
-  - FFHQ (70k faces) via HuggingFace `huggan/FFHQ`
+  - FFHQ (70k faces) via HuggingFace `marcosv/ffhq-dataset`
 
 Usage:
   # Full FFHQ dataset
@@ -31,28 +31,26 @@ def download_ffhq(output_dir: str, max_images: int = None, image_size: int = 256
         print("Run: pip install datasets>=2.14.0")
         return
 
-    print("Loading FFHQ from HuggingFace (huggan/FFHQ)...")
-    dataset = load_dataset("huggan/FFHQ", split="train")
-
-    total = len(dataset)
-    if max_images and max_images < total:
-        print(f"Using {max_images}/{total} images (subset)")
-        total = max_images
-    else:
-        print(f"Using all {total} images")
-
     # Create output dirs
     train_dir = Path(output_dir) / "train"
     val_dir = Path(output_dir) / "val"
     train_dir.mkdir(parents=True, exist_ok=True)
     val_dir.mkdir(parents=True, exist_ok=True)
 
+    # Use streaming to avoid downloading entire dataset upfront
+    print("Loading FFHQ from HuggingFace (marcosv/ffhq-dataset) with streaming...")
+    dataset = load_dataset("marcosv/ffhq-dataset", split="train", streaming=True)
+
+    total = max_images or 70000
     split_idx = int(total * (1 - val_split))
     train_count = 0
     val_count = 0
 
-    for idx in tqdm(range(total), desc="Processing"):
-        img = dataset[idx]["image"]
+    for idx, sample in enumerate(tqdm(dataset, total=total, desc="Downloading")):
+        if max_images and idx >= max_images:
+            break
+
+        img = sample["image"]
 
         # Resize
         if img.size != (image_size, image_size):
