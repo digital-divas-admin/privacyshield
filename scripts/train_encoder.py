@@ -199,7 +199,10 @@ def tb_log(writer, tag: str, value: float, step: int):
 
 def generate_pairs(args):
     """Pre-compute PGD perturbation pairs for Phase 1 training."""
+    from torchvision.utils import save_image
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    pgd_batch = getattr(args, "pgd_batch_size", 1)
 
     face_model = FaceEmbedder(weights_path=args.arcface_weights, device=device)
     eot = EoTWrapper(model=face_model, num_samples=args.eot_samples).to(device)
@@ -213,23 +216,33 @@ def generate_pairs(args):
 
     # Only generate from training split to avoid val data leak
     dataset = FaceDataset(args.data_dir, split="train")
+    loader = DataLoader(dataset, batch_size=pgd_batch, shuffle=False,
+                        num_workers=args.num_workers, pin_memory=torch.cuda.is_available())
     clean_dir = Path(args.output_dir) / "clean"
     delta_dir = Path(args.output_dir) / "delta"
     clean_dir.mkdir(parents=True, exist_ok=True)
     delta_dir.mkdir(parents=True, exist_ok=True)
 
-    for idx in tqdm(range(len(dataset)), desc="Generating PGD pairs"):
-        x = dataset[idx].unsqueeze(0).to(device)
-        x_adv, _ = attack.run(x)
+    global_idx = 0
+    total = len(dataset)
+    pbar = tqdm(total=total, desc="Generating PGD pairs")
 
-        delta = x_adv - x
-        # Save delta as image (shift to [0,1] by adding 0.5)
-        delta_img = (delta.squeeze(0).cpu() + 0.5).clamp(0, 1)
-        clean_img = x.squeeze(0).cpu()
+    for batch in loader:
+        batch = batch.to(device)
+        x_adv, _ = attack.run(batch)
 
-        from torchvision.utils import save_image
-        save_image(clean_img, clean_dir / f"{idx:06d}.png")
-        save_image(delta_img, delta_dir / f"{idx:06d}.png")
+        deltas = x_adv - batch
+        for i in range(batch.shape[0]):
+            delta_img = (deltas[i].cpu() + 0.5).clamp(0, 1)
+            clean_img = batch[i].cpu()
+            save_image(clean_img, clean_dir / f"{global_idx:06d}.png")
+            save_image(delta_img, delta_dir / f"{global_idx:06d}.png")
+            global_idx += 1
+
+        pbar.update(batch.shape[0])
+
+    pbar.close()
+    print(f"Generated {global_idx} pairs in {clean_dir.parent}")
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +707,8 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon", type=float, default=8/255)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--eot-samples", type=int, default=10)
+    parser.add_argument("--pgd-batch-size", type=int, default=8,
+                        help="Batch size for PGD pair generation (default: 8, higher = faster but more VRAM)")
     parser.add_argument("--num-workers", type=int, default=None,
                         help="DataLoader workers (default: 0 on Windows, 4 on Linux)")
     parser.add_argument("--patience", type=int, default=10,

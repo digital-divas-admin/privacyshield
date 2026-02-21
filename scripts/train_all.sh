@@ -15,6 +15,7 @@ EPOCHS=${EPOCHS:-50}
 DATA_DIR=${DATA_DIR:-./data/faces}
 PAIRS_DIR=${PAIRS_DIR:-./data/pairs}
 CKPT_DIR=${CKPT_DIR:-./checkpoints}
+PGD_BATCH=${PGD_BATCH:-8}
 
 echo "=== PrivacyShield Full Training Pipeline ==="
 echo "Epochs: $EPOCHS | Data: $DATA_DIR | Checkpoints: $CKPT_DIR"
@@ -25,7 +26,8 @@ echo ""
 if [ ! -d "$PAIRS_DIR/clean" ]; then
     echo "=== Phase 0: Generating PGD pairs ==="
     python scripts/train_encoder.py --phase generate \
-        --data-dir "$DATA_DIR/train" --output-dir "$PAIRS_DIR"
+        --data-dir "$DATA_DIR/train" --output-dir "$PAIRS_DIR" \
+        --pgd-batch-size "$PGD_BATCH"
     echo "PGD pairs done: $(date)"
 else
     echo "=== Skipping PGD pair generation (already exists) ==="
