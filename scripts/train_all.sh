@@ -47,7 +47,8 @@ echo "=== Phase 2a: U-Net V2 E2E ==="
 python scripts/train_encoder.py --phase v2_e2e \
     --encoder-type unet --data-dir "$DATA_DIR" \
     --checkpoint "$CKPT_DIR/distill_best.pt" \
-    --use-mask --epochs "$EPOCHS" --checkpoint-dir "$CKPT_DIR"
+    --use-mask --epochs "$EPOCHS" --checkpoint-dir "$CKPT_DIR" \
+    --batch-size 4
 echo "U-Net v2_e2e done: $(date)"
 
 # Phase 3: ViT distill
@@ -64,7 +65,8 @@ echo "=== Phase 2b: ViT V2 E2E ==="
 python scripts/train_encoder.py --phase v2_e2e \
     --encoder-type vit --data-dir "$DATA_DIR" \
     --checkpoint "$CKPT_DIR/vit_distill_best.pt" \
-    --use-mask --epochs "$EPOCHS" --checkpoint-dir "$CKPT_DIR"
+    --use-mask --epochs "$EPOCHS" --checkpoint-dir "$CKPT_DIR" \
+    --batch-size 2
 echo "ViT v2_e2e done: $(date)"
 
 echo ""

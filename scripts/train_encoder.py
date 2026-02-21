@@ -573,6 +573,10 @@ def train_v2_e2e(args):
     best_loss = float("inf")
     patience_counter = 0
 
+    # Mixed precision for memory efficiency (v2_e2e is very memory-heavy)
+    use_amp = device == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
     try:
         for epoch in range(args.epochs):
             encoder.train()
@@ -590,31 +594,34 @@ def train_v2_e2e(args):
                     # Compute semantic mask (no grad, fixed per batch)
                     mask = semantic_mask(clean) if semantic_mask is not None else None
 
-                # Generate perturbation
-                delta = encoder(clean)
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    # Generate perturbation
+                    delta = encoder(clean)
 
-                # Apply semantic mask
-                if mask is not None:
-                    delta = delta * mask
+                    # Apply semantic mask
+                    if mask is not None:
+                        delta = delta * mask
 
-                x_adv = (clean + delta).clamp(0, 1)
+                    x_adv = (clean + delta).clamp(0, 1)
 
-                # EoT-averaged unified loss
-                total_loss = torch.tensor(0.0, device=device)
-                step_metrics = {}
+                    # EoT-averaged unified loss
+                    total_loss = torch.tensor(0.0, device=device)
+                    step_metrics = {}
 
-                for _ in range(args.eot_samples):
-                    x_t = eot.apply_random_transform(x_adv)
-                    loss_t, metrics_t = unified_loss(clean, x_t, clean_arcface, clean_clip)
-                    total_loss = total_loss + loss_t
-                    step_metrics = metrics_t  # Keep last sample's metrics
+                    for _ in range(args.eot_samples):
+                        x_t = eot.apply_random_transform(x_adv)
+                        loss_t, metrics_t = unified_loss(clean, x_t, clean_arcface, clean_clip)
+                        total_loss = total_loss + loss_t
+                        step_metrics = metrics_t  # Keep last sample's metrics
 
-                avg_loss = total_loss / args.eot_samples
+                    avg_loss = total_loss / args.eot_samples
 
                 optimizer.zero_grad()
-                avg_loss.backward()
+                scaler.scale(avg_loss).backward()
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(encoder.parameters(), 1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
 
                 bs = clean.shape[0]
                 running["loss"] += avg_loss.item() * bs
