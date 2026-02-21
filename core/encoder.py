@@ -141,9 +141,8 @@ class NoiseEncoder(nn.Module):
         # Decoder path
         self.decoders = nn.ModuleList()
         for i in range(depth - 1, -1, -1):
-            in_c = ch * (2 ** (i + 1)) + ch * (2 ** i) if i > 0 else ch * 2 + ch
-            # After concat with skip, we have 2x channels
-            dec_in = ch * (2 ** (i + 1)) * 2 if i < depth - 1 else bottleneck_ch + ch * (2 ** i)
+            # h_channels (from previous decoder or bottleneck) + skip_channels
+            dec_in = ch * (2 ** (i + 1)) + ch * (2 ** i)
             out_c = ch * (2 ** i) if i > 0 else ch
             self.decoders.append(UpBlock(dec_in, out_c, dropout))
 
