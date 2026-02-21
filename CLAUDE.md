@@ -17,7 +17,10 @@ recognition systems (ArcFace, CLIP) and deepfake pipelines (Roop, IP-Adapter).
 - `core/adaface_backbone.py` — AdaFace IR-101 backbone for ensemble
 - `core/deepfake_test.py` — Deepfake tool testing (inswapper + IP-Adapter FaceID Plus v2)
 - `api/main.py` — FastAPI backend (modes: pgd, encoder, vit, v2, v2_full)
-- `scripts/train_encoder.py` — 3-phase training (generate → distill → v2_e2e)
+- `scripts/train_encoder.py` — 4-phase training (generate → distill → e2e → v2_e2e), U-Net + ViT
+- `scripts/prepare_data.py` — Download FFHQ from HuggingFace, resize, train/val split
+- `scripts/runpod_setup.sh` — Cloud GPU setup (install deps, download data, verify weights)
+- `scripts/train_all.sh` — Unattended full training pipeline (all phases, both encoders)
 - `scripts/evaluate.py` — Evaluation across JPEG/resize/blur conditions
 - `scripts/test_deepfake.py` — CLI script for deepfake tool testing
 
@@ -35,15 +38,69 @@ recognition systems (ArcFace, CLIP) and deepfake pipelines (Roop, IP-Adapter).
 - `uvicorn api.main:app --host 0.0.0.0 --port 8000`
 
 ## Training pipeline
+
+### Data preparation
 ```bash
-# Phase 1: Generate PGD perturbation pairs
-python scripts/train_encoder.py --phase generate --data-dir ./data/faces --output-dir ./data/pairs
+# Full FFHQ (70k images)
+python scripts/prepare_data.py --output-dir ./data/faces --dataset ffhq
 
-# Phase 2: Distill PGD into encoder
-python scripts/train_encoder.py --phase distill --pairs-dir ./data/pairs --epochs 50
+# 5k subset for validation runs
+python scripts/prepare_data.py --output-dir ./data/faces --dataset ffhq --max-images 5000
+```
 
-# Phase 3: V2 end-to-end with LPIPS + CLIP + semantic mask
-python scripts/train_encoder.py --phase v2_e2e --checkpoint ./checkpoints/best.pt --use-mask --epochs 50
+### U-Net encoder training (~50ms inference)
+```bash
+# Generate PGD pairs
+python scripts/train_encoder.py --phase generate --data-dir ./data/faces/train --output-dir ./data/pairs
+
+# Distill PGD into U-Net
+python scripts/train_encoder.py --phase distill --encoder-type unet --pairs-dir ./data/pairs --data-dir ./data/faces --epochs 50
+
+# V2 E2E fine-tune (saves checkpoints/best.pt)
+python scripts/train_encoder.py --phase v2_e2e --encoder-type unet --data-dir ./data/faces \
+  --checkpoint ./checkpoints/distill_best.pt --use-mask --epochs 50
+```
+
+### ViT encoder training (~170ms inference)
+```bash
+# Distill PGD into ViT (reuses same PGD pairs)
+python scripts/train_encoder.py --phase distill --encoder-type vit --pairs-dir ./data/pairs --data-dir ./data/faces --epochs 50
+
+# V2 E2E fine-tune (saves checkpoints/vit_best.pt)
+python scripts/train_encoder.py --phase v2_e2e --encoder-type vit --data-dir ./data/faces \
+  --checkpoint ./checkpoints/vit_distill_best.pt --use-mask --epochs 50
+```
+
+### Training features
+- `--encoder-type {unet, vit}` — architecture selection with smart defaults (batch, lr)
+- `--arcface-weights` — path to ArcFace weights (default: `./weights/arcface_r100.pth`)
+- `--patience N` — early stopping after N epochs without val improvement (default: 10)
+- `--no-tensorboard` — disable TensorBoard logging (logs to `checkpoints/logs/`)
+- `--num-workers N` — DataLoader workers (auto: 0 on Windows, 4 on Linux)
+- Validation split: uses `data/faces/train/` + `data/faces/val/` if present, else 90/10 split
+- ViT gets linear warmup (5 epochs) before cosine annealing
+
+### Cloud training (RunPod RTX 4090, $0.50/hr)
+5k subset: ~15 hrs (~$8). Full 70k: ~60 hrs (~$30).
+```bash
+# SSH into RunPod, clone repo, copy ArcFace weights
+git clone <repo> && cd privacyshield
+scp local:privacyshield/weights/arcface_r100.pth ./weights/
+
+# Automated setup (install deps + download data)
+bash scripts/runpod_setup.sh --subset 5000   # 5k subset
+bash scripts/runpod_setup.sh                  # full 70k
+
+# Run all training unattended
+nohup bash scripts/train_all.sh > training.log 2>&1 &
+tail -f training.log
+
+# Monitor
+tensorboard --logdir ./checkpoints/logs/ --bind_all
+
+# Copy checkpoints back
+scp ./checkpoints/best.pt local:privacyshield/checkpoints/
+scp ./checkpoints/vit_best.pt local:privacyshield/checkpoints/
 ```
 
 ## Deepfake tool testing
@@ -97,8 +154,7 @@ target_image (optional), run_inswapper, run_ipadapter, prompt, threshold.
 - Needs: training data (CelebA/VGGFace2), GPU training run for encoder modes
 
 ## What to build next
-- Set up training data pipeline with CelebA-HQ
-- Run training phases 1-3
+- Run encoder training on GPU cloud (5k subset first, then full 70k)
 - Test with real-world face photos (not padded crops) for more representative metrics
 - Add InstantID testing to deepfake test registry
 - Build React demo frontend with before/after slider

@@ -20,6 +20,10 @@ open_clip_torch>=2.20.0     # CLIP ViT-H/14 for dual-targeting
 # Cross-model ensemble (optional — improves transferability)
 facenet-pytorch>=2.5.3      # FaceNet InceptionResNet-V1 for ensemble attack
 
+# Training data pipeline
+datasets>=2.14.0              # HuggingFace datasets for FFHQ download
+tensorboard>=2.14.0           # Training visualization
+
 # Deepfake tool testing (for testing protection against real deepfake pipelines)
 diffusers>=0.25.0           # IP-Adapter FaceID Plus v2 (Stable Diffusion)
 transformers>=4.30.0        # Required by diffusers for CLIP

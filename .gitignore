@@ -23,5 +23,10 @@ nul
 Thumbs.db
 .DS_Store
 
+# Data & outputs
+data/
+test_*
+test_deepfake_outputs/
+
 # Misc
 *.log
