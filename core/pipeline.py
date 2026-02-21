@@ -61,6 +61,10 @@ class PipelineConfig:
     # Full image mode
     full_image: bool = False  # If True, attack full image with diff alignment
 
+    # Ensemble
+    adaface_weights: Optional[str] = None
+    ensemble_weights: Optional[Dict[str, float]] = None
+
     # Logging
     verbose: bool = True
 
@@ -84,14 +88,16 @@ class ProtectionPipeline:
         self.config = config or PipelineConfig()
         self._ready = False
 
-    def setup(self, device: str = "cuda", arcface_weights: Optional[str] = None):
+    def setup(self, device: Optional[str] = None, arcface_weights: Optional[str] = None):
         """Initialize all models. Call once at startup."""
-        from .face_model import FaceEmbedder
+        from .face_model import FaceEmbedder, FaceNetWrapper, AdaFaceWrapper, EnsembleFaceModel
         from .eot import EoTWrapper
         from .losses import PrivacyShieldLoss, LPIPSLoss, CLIPVisionWrapper
         from .semantic_mask import SemanticMask, DEFAULT_MASK_WEIGHTS, STEALTH_MASK_WEIGHTS
         from .diff_align import DifferentiableAligner
 
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         cfg = self.config
 
@@ -102,15 +108,28 @@ class ProtectionPipeline:
             device=device,
         )
 
-        # 2. CLIP model (for dual-targeting)
+        # 2. Ensemble models (FaceNet + AdaFace)
+        self.facenet_model = FaceNetWrapper(device=device)
+        self.adaface_model = AdaFaceWrapper(
+            weights_path=cfg.adaface_weights,
+            device=device,
+        )
+        self.ensemble_model = EnsembleFaceModel(
+            arcface_model=self.face_model,
+            facenet_model=self.facenet_model,
+            adaface_model=self.adaface_model,
+            weights=cfg.ensemble_weights,
+        )
+
+        # 3. CLIP model (for dual-targeting)
         print("Loading CLIP Vision...")
         self.clip_model = CLIPVisionWrapper(device=device)
 
-        # 3. LPIPS
+        # 4. LPIPS
         print("Loading LPIPS...")
         self.lpips_loss = LPIPSLoss(device=device)
 
-        # 4. EoT wrapper (uses face_model internally for transforms)
+        # 5. EoT wrapper (uses face_model internally for transforms)
         self.eot = EoTWrapper(
             model=self.face_model,
             num_samples=cfg.eot_samples,
@@ -119,7 +138,8 @@ class ProtectionPipeline:
             gaussian_sigma_range=cfg.gaussian_sigma_range,
         ).to(device)
 
-        # 5. Unified loss
+        # 6. Unified loss (with ensemble if available)
+        has_ensemble = len(self.ensemble_model.active_model_names) > 1
         self.loss_fn = PrivacyShieldLoss(
             face_model=self.face_model,
             clip_model=self.clip_model if self.clip_model.is_available else None,
@@ -128,9 +148,10 @@ class ProtectionPipeline:
             beta_clip=cfg.beta_clip,
             lambda_lpips=cfg.lambda_lpips,
             lambda_reg=cfg.lambda_reg,
+            ensemble_model=self.ensemble_model if has_ensemble else None,
         )
 
-        # 6. Semantic mask
+        # 7. Semantic mask
         if cfg.use_semantic_mask and cfg.mask_mode != "off":
             weights = STEALTH_MASK_WEIGHTS if cfg.mask_mode == "stealth" else DEFAULT_MASK_WEIGHTS
             self.semantic_mask = SemanticMask(mask_weights=weights)
@@ -138,7 +159,7 @@ class ProtectionPipeline:
         else:
             self.semantic_mask = None
 
-        # 7. Differentiable aligner (for full-image mode)
+        # 8. Differentiable aligner (for full-image mode)
         self.aligner = DifferentiableAligner(output_size=112)
 
         self._ready = True
@@ -167,8 +188,12 @@ class ProtectionPipeline:
         start_time = time.time()
 
         # Pre-compute clean embeddings (frozen targets)
+        has_ensemble = len(self.ensemble_model.active_model_names) > 1
         with torch.no_grad():
-            clean_arcface = self.face_model(x)
+            if has_ensemble:
+                clean_arcface = self.ensemble_model.get_all_clean_embeddings(x)
+            else:
+                clean_arcface = self.face_model(x)
             clean_clip = None
             if self.clip_model.is_available:
                 clean_clip = self.clip_model(x)
@@ -274,12 +299,25 @@ class ProtectionPipeline:
         elapsed = time.time() - start_time
 
         with torch.no_grad():
+            # ArcFace evaluation (use raw ArcFace embedding for backward compat)
+            clean_arcface_emb = clean_arcface["arcface"] if isinstance(clean_arcface, dict) else clean_arcface
             final_arcface = self.face_model(x_protected)
-            cos_clean = F.cosine_similarity(clean_arcface, final_arcface, dim=1).mean().item()
+            cos_clean = F.cosine_similarity(clean_arcface_emb, final_arcface, dim=1).mean().item()
 
             # Robust evaluation (more EoT samples)
             robust_emb = self.eot.get_transformed_embedding(x_protected, num_avg=30)
-            cos_robust = F.cosine_similarity(clean_arcface, robust_emb, dim=1).mean().item()
+            cos_robust = F.cosine_similarity(clean_arcface_emb, robust_emb, dim=1).mean().item()
+
+            # Per-model evaluation (ensemble)
+            per_model_sim = {}
+            if has_ensemble:
+                all_clean = clean_arcface if isinstance(clean_arcface, dict) else {"arcface": clean_arcface}
+                for name in self.ensemble_model.active_model_names:
+                    if name in all_clean:
+                        model = self.ensemble_model._models[name]
+                        adv_emb = model(x_protected)
+                        sim = F.cosine_similarity(all_clean[name], adv_emb, dim=1).mean().item()
+                        per_model_sim[name] = sim
 
             # CLIP evaluation
             cos_clip = 0.0
@@ -305,11 +343,17 @@ class ProtectionPipeline:
             "num_steps": cfg.num_steps,
             "history": history,
         }
+        if per_model_sim:
+            final_metrics["per_model_similarity"] = per_model_sim
 
         if cfg.verbose:
             print(f"\n{'=' * 60}")
             print(f"  Protection Complete ({elapsed:.1f}s)")
             print(f"  ArcFace cos sim:  {cos_clean:.4f} (robust: {cos_robust:.4f})")
+            if per_model_sim:
+                for name, sim in per_model_sim.items():
+                    if name != "arcface":
+                        print(f"  {name.capitalize()} cos sim: {sim:.4f}")
             print(f"  CLIP cos sim:     {cos_clip:.4f}")
             print(f"  LPIPS:            {lpips_final:.4f}")
             print(f"  PSNR:             {final_metrics['psnr']:.1f} dB")
@@ -356,8 +400,11 @@ class ProtectionPipeline:
         )
 
         # Pre-compute clean embedding through differentiable warp
+        has_ensemble = len(self.ensemble_model.active_model_names) > 1
         with torch.no_grad():
             aligned_clean = self.aligner.warp(x, grid)
+            if has_ensemble:
+                clean_embs_all = self.ensemble_model.get_all_clean_embeddings(aligned_clean)
             clean_arcface = self.face_model(aligned_clean)
             clean_clip = None
             if self.clip_model.is_available:
@@ -390,14 +437,20 @@ class ProtectionPipeline:
             # Differentiable warp → aligned face
             aligned_adv = self.aligner.warp(x_adv, grid)
 
-            # EoT-averaged arcface + clip distance loss
+            # EoT-averaged identity + clip distance loss
             # (skip LPIPS/L1 reg — they fight the attack in full-image mode)
             total_loss = torch.tensor(0.0, device=self.device)
             for _ in range(eot_n):
                 x_t = self.eot.apply_random_transform(aligned_adv)
-                adv_emb = self.face_model(x_t)
-                cos_sim = F.cosine_similarity(clean_arcface, adv_emb, dim=1).mean()
-                sample_loss = cos_sim
+                if has_ensemble:
+                    # Ensemble: weighted loss across all FR models
+                    ens_loss, _ = self.ensemble_model.ensemble_cosine_loss(clean_embs_all, x_t)
+                    sample_loss = ens_loss
+                else:
+                    # Single-model: ArcFace only
+                    adv_emb = self.face_model(x_t)
+                    cos_sim = F.cosine_similarity(clean_arcface, adv_emb, dim=1).mean()
+                    sample_loss = cos_sim
                 if self.clip_model.is_available and clean_clip is not None:
                     adv_clip = self.clip_model(x_t)
                     if adv_clip is not None:
@@ -449,14 +502,30 @@ class ProtectionPipeline:
             prot_emb = self.face_model(aligned_prot)
             cos_sim = F.cosine_similarity(clean_arcface, prot_emb, dim=1).mean().item()
 
+            # Per-model evaluation
+            per_model_sim = {}
+            if has_ensemble:
+                for name in self.ensemble_model.active_model_names:
+                    if name in clean_embs_all:
+                        model = self.ensemble_model._models[name]
+                        adv_emb = model(aligned_prot)
+                        sim = F.cosine_similarity(clean_embs_all[name], adv_emb, dim=1).mean().item()
+                        per_model_sim[name] = sim
+
         delta_final = x_protected - x
         metrics = {
             "arcface_cos_sim": cos_sim,
             "delta_linf": delta_final.abs().max().item(),
             "processing_time_s": elapsed,
         }
+        if per_model_sim:
+            metrics["per_model_similarity"] = per_model_sim
 
         if cfg.verbose:
             print(f"\nFull-image protection: cos_sim={cos_sim:.4f}, time={elapsed:.1f}s")
+            if per_model_sim:
+                for name, sim in per_model_sim.items():
+                    if name != "arcface":
+                        print(f"  {name}: cos_sim={sim:.4f}")
 
         return x_protected.detach(), metrics

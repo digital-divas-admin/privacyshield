@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/protect", label: "Protect", icon: "🛡" },
   { href: "/batch", label: "Batch", icon: "📁" },
   { href: "/analyze", label: "Analyze", icon: "🔍" },
+  { href: "/deepfake", label: "Deepfake Test", icon: "🎭" },
   { href: "/health", label: "System", icon: "⚙" },
 ];
 

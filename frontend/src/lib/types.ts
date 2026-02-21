@@ -23,6 +23,8 @@ export interface ProtectionMetrics {
   // Legacy mode fields
   cosineSim?: number;
   robustCosineSim?: number;
+  // Ensemble per-model similarities
+  perModelSimilarity?: Record<string, number>;
 }
 
 export interface ProtectionResult {
@@ -42,6 +44,7 @@ export interface TransformResult {
   cosine_similarity: number;
   is_match: boolean;
   protection_holds: boolean;
+  per_model_similarity?: Record<string, number>;
 }
 
 export interface EvaluateResult {
@@ -101,6 +104,32 @@ export interface HealthStatus {
   encoder_loaded: boolean;
   vit_encoder_loaded: boolean;
   pipeline_v2_loaded: boolean;
+  facenet_loaded: boolean;
+  adaface_loaded: boolean;
+  ensemble_models: string[];
+  inswapper_loaded: boolean;
+  ipadapter_loaded: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Deepfake tool testing types
+// ---------------------------------------------------------------------------
+
+export interface DeepfakeToolResult {
+  tool_name: string;
+  clean_output_b64?: string;
+  protected_output_b64?: string;
+  clean_similarity: number;
+  protected_similarity: number;
+  protection_effective: boolean;
+  error?: string;
+  processing_time_ms: number;
+}
+
+export interface DeepfakeTestResult {
+  inswapper?: DeepfakeToolResult;
+  ipadapter?: DeepfakeToolResult;
+  overall_verdict: string;
 }
 
 // ---------------------------------------------------------------------------

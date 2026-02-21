@@ -16,3 +16,12 @@ pydantic>=2.0.0
 lpips>=0.1.4                # Perceptual loss — gold standard
 open_clip_torch>=2.20.0     # CLIP ViT-H/14 for dual-targeting
 # transformers>=4.30.0      # Fallback CLIP backend (if open_clip unavailable)
+
+# Cross-model ensemble (optional — improves transferability)
+facenet-pytorch>=2.5.3      # FaceNet InceptionResNet-V1 for ensemble attack
+
+# Deepfake tool testing (for testing protection against real deepfake pipelines)
+diffusers>=0.25.0           # IP-Adapter FaceID Plus v2 (Stable Diffusion)
+transformers>=4.30.0        # Required by diffusers for CLIP
+accelerate>=0.25.0          # Required by diffusers for model loading
+peft>=0.7.0                 # Required for LoRA weight loading

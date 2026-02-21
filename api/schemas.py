@@ -1,7 +1,7 @@
 """Pydantic models for API request/response validation."""
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Dict, Optional, List
 from enum import Enum
 
 
@@ -44,6 +44,11 @@ class HealthResponse(BaseModel):
     encoder_loaded: bool
     vit_encoder_loaded: bool
     pipeline_v2_loaded: bool = False
+    facenet_loaded: bool = False
+    adaface_loaded: bool = False
+    ensemble_models: List[str] = Field(default_factory=list, description="Active ensemble model names")
+    inswapper_loaded: bool = False
+    ipadapter_loaded: bool = False
 
 
 class BatchProtectRequest(BaseModel):
@@ -65,6 +70,7 @@ class TransformResult(BaseModel):
     cosine_similarity: float = Field(description="Cosine similarity after transform")
     is_match: bool = Field(description="Whether face recognition still matches (cos_sim > threshold)")
     protection_holds: bool = Field(description="Whether protection survives this transform (cos_sim < threshold)")
+    per_model_similarity: Optional[Dict[str, float]] = Field(default=None, description="Per-model cosine similarities when ensemble is active")
 
 
 class EvaluateResponse(BaseModel):
@@ -100,3 +106,26 @@ class BatchProtectResponse(BaseModel):
     succeeded: int
     failed: int
     results: List[BatchProtectResult]
+
+
+# ---------------------------------------------------------------------------
+# Deepfake tool testing schemas
+# ---------------------------------------------------------------------------
+
+class DeepfakeToolResultSchema(BaseModel):
+    """Result from a single deepfake tool test."""
+    tool_name: str = Field(description="Tool tested: inswapper or ipadapter")
+    clean_output_b64: Optional[str] = Field(default=None, description="Base64 PNG of output from clean input")
+    protected_output_b64: Optional[str] = Field(default=None, description="Base64 PNG of output from protected input")
+    clean_similarity: float = Field(default=0.0, description="Cosine sim: clean output vs clean identity")
+    protected_similarity: float = Field(default=0.0, description="Cosine sim: protected output vs clean identity")
+    protection_effective: bool = Field(default=False, description="True if protected_similarity < threshold")
+    error: Optional[str] = Field(default=None, description="Error message if test failed")
+    processing_time_ms: float = Field(default=0.0, description="Processing time in milliseconds")
+
+
+class DeepfakeTestResponse(BaseModel):
+    """Combined response from deepfake tool testing."""
+    inswapper: Optional[DeepfakeToolResultSchema] = None
+    ipadapter: Optional[DeepfakeToolResultSchema] = None
+    overall_verdict: str = Field(default="untested", description="protected, partial, vulnerable, or error")

@@ -100,6 +100,45 @@ export function SystemStatus() {
               loaded={health.pipeline_v2_loaded}
               detail="LPIPS + CLIP + semantic mask"
             />
+            <StatusRow
+              label="FaceNet (InceptionResNet-V1)"
+              loaded={health.facenet_loaded}
+              detail="Ensemble member — VGGFace2 pretrained"
+            />
+            <StatusRow
+              label="AdaFace (IR-101)"
+              loaded={health.adaface_loaded}
+              detail="Ensemble member — requires weights download"
+            />
+            <StatusRow
+              label="Inswapper (Roop)"
+              loaded={health.inswapper_loaded}
+              detail="Face swap model — lazy-loaded on first deepfake test"
+            />
+            <StatusRow
+              label="IP-Adapter FaceID Plus v2"
+              loaded={health.ipadapter_loaded}
+              detail="Generative deepfake — requires diffusers"
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Ensemble Status */}
+      {health && health.ensemble_models.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Ensemble Attack</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="mb-2 text-xs text-muted-foreground">
+              Cross-model ensemble optimizes perturbations against multiple FR models for improved transferability.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {health.ensemble_models.map((name) => (
+                <Badge key={name} variant="success">{name}</Badge>
+              ))}
+            </div>
           </CardContent>
         </Card>
       )}

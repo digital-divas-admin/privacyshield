@@ -7,6 +7,7 @@ import type {
   BatchResult,
   AnalyzeResult,
   HealthStatus,
+  DeepfakeTestResult,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,17 @@ export async function protectImage(
   const mode = res.headers.get("X-Privacy-Mode") || params.mode;
   const isV2 = mode.startsWith("v2");
 
+  // Parse per-model similarity JSON header
+  let perModelSimilarity: Record<string, number> | undefined;
+  const perModelRaw = res.headers.get("X-Per-Model-Similarity");
+  if (perModelRaw) {
+    try {
+      perModelSimilarity = JSON.parse(perModelRaw);
+    } catch {
+      // ignore parse errors
+    }
+  }
+
   const metrics: ProtectionMetrics = {
     mode,
     arcfaceCosSim: isV2 ? h("X-ArcFace-Cos-Sim") : h("X-Cosine-Sim"),
@@ -60,6 +72,7 @@ export async function protectImage(
     processingMs: h("X-Processing-Ms"),
     cosineSim: h("X-Cosine-Sim"),
     robustCosineSim: h("X-Robust-Cosine-Sim"),
+    perModelSimilarity,
   };
 
   return { protectedImageBlob: blob, protectedImageUrl: url, metrics };
@@ -127,6 +140,40 @@ export async function analyzeImages(
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || `Analyze failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Deepfake tool testing
+// ---------------------------------------------------------------------------
+
+export async function testDeepfake(
+  cleanImage: File | Blob,
+  protectedImage: File | Blob,
+  options: {
+    targetImage?: File | Blob;
+    runInswapper?: boolean;
+    runIpadapter?: boolean;
+    prompt?: string;
+    threshold?: number;
+  } = {}
+): Promise<DeepfakeTestResult> {
+  const form = new FormData();
+  form.append("clean_image", cleanImage, "clean.png");
+  form.append("protected_image", protectedImage, "protected.png");
+  if (options.targetImage) {
+    form.append("target_image", options.targetImage, "target.png");
+  }
+  form.append("run_inswapper", String(options.runInswapper ?? true));
+  form.append("run_ipadapter", String(options.runIpadapter ?? false));
+  form.append("prompt", options.prompt ?? "a photo of a person");
+  form.append("threshold", String(options.threshold ?? 0.3));
+
+  const res = await fetch(`${API_URL}/test-deepfake`, { method: "POST", body: form });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Deepfake test failed: ${res.status}`);
   }
   return res.json();
 }

@@ -4,7 +4,13 @@ All hyperparameters for attack, EoT, encoder, and API.
 """
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Dict, Optional, Tuple
+
+import torch
+
+
+def _default_device() -> str:
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @dataclass
@@ -61,7 +67,23 @@ class FaceModelConfig:
     model_name: str = "buffalo_l"     # InsightFace model pack
     det_size: Tuple[int, int] = (640, 640)
     embedding_dim: int = 512
-    device: str = "cuda"
+    device: str = ""
+
+    def __post_init__(self):
+        if not self.device:
+            self.device = _default_device()
+
+
+@dataclass
+class EnsembleConfig:
+    """Cross-model ensemble attack parameters."""
+    enable_facenet: bool = True          # Load FaceNet InceptionResNet-V1
+    enable_adaface: bool = True          # Load AdaFace IR-101
+    adaface_weights: str = "./weights/adaface_ir101.pth"
+    # Per-model weights (normalized at runtime)
+    weight_arcface: float = 1.0
+    weight_facenet: float = 0.5
+    weight_adaface: float = 0.5
 
 
 @dataclass
@@ -81,6 +103,7 @@ class Config:
     diff_jpeg: DiffJPEGConfig = field(default_factory=DiffJPEGConfig)
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     face_model: FaceModelConfig = field(default_factory=FaceModelConfig)
+    ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
     api: APIConfig = field(default_factory=APIConfig)
 
 

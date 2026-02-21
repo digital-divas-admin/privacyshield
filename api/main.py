@@ -31,6 +31,7 @@ from .schemas import (
     ProtectMode, ProtectResponse, HealthResponse,
     TransformResult, EvaluateResponse,
     BatchProtectResult, BatchProtectResponse,
+    DeepfakeToolResultSchema, DeepfakeTestResponse,
 )
 from config import config
 
@@ -60,7 +61,11 @@ class ModelRegistry:
     pipeline_v2 = None          # Full v2 pipeline with LPIPS + CLIP + mask
     diff_jpeg = None            # Reusable DiffJPEG instance for evaluation
     upscaler = None             # Real-ESRGAN for upscaler robustness testing
-    device = "cpu"
+    facenet_model = None        # FaceNet InceptionResNet-V1 (ensemble)
+    adaface_model = None        # AdaFace IR-101 (ensemble)
+    ensemble_model = None       # EnsembleFaceModel wrapping all FR models
+    deepfake_registry = None    # DeepfakeTestRegistry (lazy-loaded on first /test-deepfake call)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 registry = ModelRegistry()
@@ -178,21 +183,64 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Warning: ViT encoder load failed: {e}")
 
-    # --- v2 Pipeline (with LPIPS + CLIP + semantic mask) ---
+    # --- Ensemble face models (FaceNet + AdaFace) ---
+    try:
+        from core.face_model import FaceNetWrapper, AdaFaceWrapper, EnsembleFaceModel
+
+        if config.ensemble.enable_facenet:
+            registry.facenet_model = FaceNetWrapper(device=device)
+
+        if config.ensemble.enable_adaface:
+            adaface_weights = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                config.ensemble.adaface_weights,
+            )
+            if os.path.exists(adaface_weights):
+                registry.adaface_model = AdaFaceWrapper(weights_path=adaface_weights, device=device)
+            else:
+                registry.adaface_model = AdaFaceWrapper(device=device)
+                print(f"AdaFace weights not found at {adaface_weights} — using random init")
+
+        if registry.face_model is not None:
+            ensemble_weights = {
+                "arcface": config.ensemble.weight_arcface,
+                "facenet": config.ensemble.weight_facenet,
+                "adaface": config.ensemble.weight_adaface,
+            }
+            registry.ensemble_model = EnsembleFaceModel(
+                arcface_model=registry.face_model,
+                facenet_model=registry.facenet_model,
+                adaface_model=registry.adaface_model,
+                weights=ensemble_weights,
+            )
+    except Exception as e:
+        print(f"Warning: Ensemble model setup failed: {e}")
+
+    # --- v2 Pipeline (with LPIPS + CLIP + semantic mask + ensemble) ---
     try:
         from core.pipeline import ProtectionPipeline, PipelineConfig
 
+        adaface_weights_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            config.ensemble.adaface_weights,
+        )
         pipe_cfg = PipelineConfig(
             epsilon=config.attack.epsilon,
             num_steps=config.attack.num_steps,
             eot_samples=config.eot.num_samples,
             use_semantic_mask=True,
             mask_mode="default",
+            adaface_weights=adaface_weights_path if os.path.exists(adaface_weights_path) else None,
+            ensemble_weights={
+                "arcface": config.ensemble.weight_arcface,
+                "facenet": config.ensemble.weight_facenet,
+                "adaface": config.ensemble.weight_adaface,
+            },
         )
         registry.pipeline_v2 = ProtectionPipeline(pipe_cfg)
         arcface_weights = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights", "arcface_r100.pth")
         registry.pipeline_v2.setup(device=device, arcface_weights=arcface_weights)
-        print("v2 Pipeline initialized (LPIPS + CLIP + semantic mask)")
+        print("v2 Pipeline initialized (LPIPS + CLIP + semantic mask + ensemble)")
     except Exception as e:
         print(f"Warning: v2 Pipeline failed to init: {e}")
         registry.pipeline_v2 = None
@@ -206,6 +254,9 @@ async def lifespan(app: FastAPI):
     del registry.eot_wrapper
     del registry.noise_encoder
     del registry.pipeline_v2
+    del registry.facenet_model
+    del registry.adaface_model
+    del registry.ensemble_model
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 
@@ -229,7 +280,7 @@ app.add_middleware(
     expose_headers=[
         "X-Privacy-Mode", "X-ArcFace-Cos-Sim", "X-CLIP-Cos-Sim",
         "X-LPIPS", "X-PSNR", "X-Delta-Linf", "X-Processing-Ms",
-        "X-Cosine-Sim", "X-Robust-Cosine-Sim",
+        "X-Cosine-Sim", "X-Robust-Cosine-Sim", "X-Per-Model-Similarity",
     ],
 )
 
@@ -435,11 +486,29 @@ def run_robustness_evaluation(
         protected = protected.unsqueeze(0)
 
     clean_emb = registry.face_model(clean)
+
+    # Pre-compute ensemble clean embeddings if available
+    ensemble_clean_embs = {}
+    if registry.ensemble_model is not None and len(registry.ensemble_model.active_model_names) > 1:
+        ensemble_clean_embs = registry.ensemble_model.get_all_clean_embeddings(clean)
+
     results: List[TransformResult] = []
 
     def eval_condition(category: str, name: str, params: dict, transformed: torch.Tensor):
         emb = registry.face_model(transformed)
         cos_sim = F.cosine_similarity(clean_emb, emb, dim=1).item()
+
+        # Per-model evaluation
+        per_model_sim = None
+        if ensemble_clean_embs:
+            per_model_sim = {}
+            for model_name in registry.ensemble_model.active_model_names:
+                if model_name in ensemble_clean_embs:
+                    model = registry.ensemble_model._models[model_name]
+                    adv_emb = model(transformed)
+                    sim = F.cosine_similarity(ensemble_clean_embs[model_name], adv_emb, dim=1).item()
+                    per_model_sim[model_name] = round(sim, 4)
+
         results.append(TransformResult(
             category=category,
             name=name,
@@ -447,6 +516,7 @@ def run_robustness_evaluation(
             cosine_similarity=round(cos_sim, 4),
             is_match=cos_sim > 0.4,
             protection_holds=cos_sim < threshold,
+            per_model_similarity=per_model_sim,
         ))
 
     # 1. Clean (no transform)
@@ -517,6 +587,13 @@ def run_robustness_evaluation(
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
+    facenet_loaded = registry.facenet_model is not None and registry.facenet_model.is_available
+    adaface_loaded = registry.adaface_model is not None and registry.adaface_model.is_available
+    ensemble_models = []
+    if registry.ensemble_model is not None:
+        ensemble_models = registry.ensemble_model.active_model_names
+
+    dfr = registry.deepfake_registry
     return HealthResponse(
         status="ok",
         device=registry.device,
@@ -524,6 +601,11 @@ async def health():
         encoder_loaded=registry.noise_encoder is not None,
         vit_encoder_loaded=registry.vit_encoder is not None,
         pipeline_v2_loaded=registry.pipeline_v2 is not None,
+        facenet_loaded=facenet_loaded,
+        adaface_loaded=adaface_loaded,
+        ensemble_models=ensemble_models,
+        inswapper_loaded=dfr.inswapper_loaded if dfr else False,
+        ipadapter_loaded=dfr.ipadapter_loaded if dfr else False,
     )
 
 
@@ -593,6 +675,12 @@ async def protect_image(
             "X-Delta-Linf": f"{info.get('delta_linf', 0):.4f}",
             "X-Processing-Ms": f"{elapsed_ms:.0f}",
         }
+
+        # Add per-model ensemble headers
+        per_model = info.get("per_model_similarity", {})
+        if per_model:
+            import json
+            headers["X-Per-Model-Similarity"] = json.dumps(per_model)
 
         return StreamingResponse(
             io.BytesIO(png_bytes),
@@ -852,8 +940,116 @@ async def analyze_similarity(
         emb2 = registry.face_model(x2)
         cos_sim = torch.nn.functional.cosine_similarity(emb1, emb2, dim=1).item()
 
-    return {
+        # Per-model similarities
+        per_model_sim = {}
+        if registry.ensemble_model is not None and len(registry.ensemble_model.active_model_names) > 1:
+            for name in registry.ensemble_model.active_model_names:
+                model = registry.ensemble_model._models[name]
+                e1 = model(x1)
+                e2 = model(x2)
+                per_model_sim[name] = round(
+                    torch.nn.functional.cosine_similarity(e1, e2, dim=1).item(), 4
+                )
+
+    result = {
         "cosine_similarity": cos_sim,
-        "is_same_person": cos_sim > 0.4,  # Typical threshold
+        "is_same_person": cos_sim > 0.4,
         "threshold": 0.4,
     }
+    if per_model_sim:
+        result["per_model_similarity"] = per_model_sim
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Deepfake tool testing
+# ---------------------------------------------------------------------------
+
+def get_deepfake_registry():
+    """Lazy-load the deepfake test registry on first use."""
+    if registry.deepfake_registry is None:
+        from core.deepfake_test import DeepfakeTestRegistry
+        registry.deepfake_registry = DeepfakeTestRegistry()
+    return registry.deepfake_registry
+
+
+def _tool_result_to_schema(r) -> DeepfakeToolResultSchema:
+    """Convert a DeepfakeToolResult dataclass to its API schema."""
+    import cv2 as _cv2
+
+    clean_b64 = None
+    protected_b64 = None
+    if r.clean_output is not None:
+        _, clean_png = _cv2.imencode(".png", r.clean_output)
+        clean_b64 = base64.b64encode(clean_png.tobytes()).decode()
+    if r.protected_output is not None:
+        _, prot_png = _cv2.imencode(".png", r.protected_output)
+        protected_b64 = base64.b64encode(prot_png.tobytes()).decode()
+
+    return DeepfakeToolResultSchema(
+        tool_name=r.tool_name,
+        clean_output_b64=clean_b64,
+        protected_output_b64=protected_b64,
+        clean_similarity=r.clean_similarity,
+        protected_similarity=r.protected_similarity,
+        protection_effective=r.protection_effective,
+        error=r.error,
+        processing_time_ms=r.processing_time_ms,
+    )
+
+
+@app.post("/test-deepfake", response_model=DeepfakeTestResponse)
+async def test_deepfake(
+    clean_image: UploadFile = File(...),
+    protected_image: UploadFile = File(...),
+    target_image: Optional[UploadFile] = File(None),
+    run_inswapper: bool = Form(True),
+    run_ipadapter: bool = Form(False),
+    prompt: str = Form("a photo of a person"),
+    threshold: float = Form(0.3),
+):
+    """
+    Test protection against real deepfake tools.
+
+    Runs clean and protected images through inswapper and/or IP-Adapter,
+    then compares the outputs to the clean identity via face recognition.
+    """
+    import cv2
+
+    clean_bytes = await clean_image.read()
+    protected_bytes = await protected_image.read()
+
+    clean_bgr = cv2.imdecode(np.frombuffer(clean_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if clean_bgr is None:
+        raise HTTPException(400, "Could not decode clean image")
+
+    protected_bgr = cv2.imdecode(np.frombuffer(protected_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if protected_bgr is None:
+        raise HTTPException(400, "Could not decode protected image")
+
+    target_bgr = None
+    if target_image is not None:
+        target_bytes = await target_image.read()
+        target_bgr = cv2.imdecode(np.frombuffer(target_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if target_bgr is None:
+            raise HTTPException(400, "Could not decode target image")
+
+    dfr = get_deepfake_registry()
+    result = dfr.run_full_test(
+        clean_bgr=clean_bgr,
+        protected_bgr=protected_bgr,
+        target_bgr=target_bgr,
+        run_inswapper=run_inswapper,
+        run_ipadapter=run_ipadapter,
+        prompt=prompt,
+        threshold=threshold,
+    )
+
+    response = DeepfakeTestResponse(overall_verdict=result.overall_verdict)
+    if result.inswapper:
+        response.inswapper = _tool_result_to_schema(result.inswapper)
+    if result.ipadapter:
+        response.ipadapter = _tool_result_to_schema(result.ipadapter)
+
+    return response

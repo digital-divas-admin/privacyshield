@@ -68,7 +68,7 @@ def _affine_to_grid(
     M: np.ndarray,
     src_size: Tuple[int, int],
     dst_size: Tuple[int, int] = (112, 112),
-    device: torch.device = torch.device("cpu"),
+    device=None,
 ) -> torch.Tensor:
     """
     Convert a 2x3 affine matrix (src→dst) into a sampling grid for grid_sample.
@@ -85,6 +85,9 @@ def _affine_to_grid(
     Returns:
         grid: (1, dst_H, dst_W, 2) sampling grid for grid_sample
     """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     dst_h, dst_w = dst_size
     src_h, src_w = src_size
 
@@ -185,7 +188,7 @@ class DifferentiableAligner(nn.Module):
         self,
         landmarks: np.ndarray,
         src_size: Tuple[int, int],
-        device: torch.device = torch.device("cpu"),
+        device=None,
     ) -> torch.Tensor:
         """
         Build a differentiable sampling grid from detected landmarks.

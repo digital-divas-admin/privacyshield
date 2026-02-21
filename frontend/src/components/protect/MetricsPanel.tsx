@@ -63,6 +63,18 @@ export function MetricsPanel({ metrics }: MetricsPanelProps) {
           detail="Higher = less visible"
         />
       )}
+      {metrics.perModelSimilarity && Object.entries(metrics.perModelSimilarity).map(([name, sim]) => {
+        if (name === "arcface") return null;
+        return (
+          <MetricCard
+            key={name}
+            label={`${name.charAt(0).toUpperCase() + name.slice(1)} Cos Sim`}
+            value={sim.toFixed(4)}
+            colorClass={simColor(sim)}
+            detail={sim < 0.3 ? "Protected" : sim < 0.4 ? "Borderline" : "Not protected"}
+          />
+        );
+      })}
       <MetricCard
         label="Delta L-inf"
         value={formatEpsilon(metrics.deltaLinf)}

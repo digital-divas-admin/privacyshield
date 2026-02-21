@@ -43,8 +43,10 @@ class LPIPSLoss(nn.Module):
     gradient-based perceptual proxy.
     """
 
-    def __init__(self, net: str = "vgg", device: str = "cuda"):
+    def __init__(self, net: str = "vgg", device: Optional[str] = None):
         super().__init__()
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self._lpips = None
         self._fallback = False
@@ -150,8 +152,10 @@ class CLIPVisionWrapper(nn.Module):
     Attacking both gives comprehensive protection.
     """
 
-    def __init__(self, model_name: str = "ViT-H-14", device: str = "cuda"):
+    def __init__(self, model_name: str = "ViT-H-14", device: Optional[str] = None):
         super().__init__()
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self._model = None
         self._preprocess = None
@@ -267,6 +271,7 @@ class PrivacyShieldLoss(nn.Module):
         beta_clip: float = 0.5,
         lambda_lpips: float = 0.1,
         lambda_reg: float = 0.01,
+        ensemble_model=None,
     ):
         super().__init__()
         self.face_model = face_model
@@ -276,12 +281,13 @@ class PrivacyShieldLoss(nn.Module):
         self.beta = beta_clip
         self.lambda_lpips = lambda_lpips
         self.lambda_reg = lambda_reg
+        self.ensemble_model = ensemble_model
 
     def forward(
         self,
         x_clean: torch.Tensor,
         x_adv: torch.Tensor,
-        clean_arcface_emb: torch.Tensor,
+        clean_arcface_emb,
         clean_clip_emb: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
@@ -290,7 +296,8 @@ class PrivacyShieldLoss(nn.Module):
         Args:
             x_clean: (B, 3, H, W) clean image
             x_adv: (B, 3, H, W) perturbed image
-            clean_arcface_emb: (B, 512) pre-computed clean ArcFace embedding
+            clean_arcface_emb: (B, 512) pre-computed clean ArcFace embedding,
+                OR a dict of per-model embeddings when ensemble is active
             clean_clip_emb: (B, D) pre-computed clean CLIP embedding (optional)
 
         Returns:
@@ -299,12 +306,22 @@ class PrivacyShieldLoss(nn.Module):
         """
         metrics = {}
 
-        # --- ArcFace identity distance ---
-        adv_arcface_emb = self.face_model(x_adv)
-        arcface_cos = F.cosine_similarity(clean_arcface_emb, adv_arcface_emb, dim=1).mean()
-        metrics["arcface_cos_sim"] = arcface_cos.item()
-
-        loss = self.alpha * arcface_cos
+        # --- Identity distance (ensemble or single-model) ---
+        if isinstance(clean_arcface_emb, dict) and self.ensemble_model is not None:
+            # Ensemble path: weighted loss across all FR models
+            ensemble_loss, ensemble_metrics = self.ensemble_model.ensemble_cosine_loss(
+                clean_arcface_emb, x_adv,
+            )
+            loss = self.alpha * ensemble_loss
+            metrics.update(ensemble_metrics)
+            # Keep arcface_cos_sim as the primary metric for backward compat
+            metrics["arcface_cos_sim"] = ensemble_metrics.get("arcface_cos_sim", 0.0)
+        else:
+            # Single-model path (original behavior)
+            adv_arcface_emb = self.face_model(x_adv)
+            arcface_cos = F.cosine_similarity(clean_arcface_emb, adv_arcface_emb, dim=1).mean()
+            metrics["arcface_cos_sim"] = arcface_cos.item()
+            loss = self.alpha * arcface_cos
 
         # --- CLIP style distance ---
         if self.clip_model is not None and self.clip_model.is_available and clean_clip_emb is not None:

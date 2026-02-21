@@ -134,7 +134,7 @@ class SemanticMask(nn.Module):
         self._bisenet = None
         self._use_bisenet = use_bisenet
 
-    def load_bisenet(self, model_path: str, device: str = "cuda"):
+    def load_bisenet(self, model_path: str, device: str = None):
         """Load BiSeNet face parsing model."""
         try:
             # BiSeNet loading — expects a standard PyTorch checkpoint
