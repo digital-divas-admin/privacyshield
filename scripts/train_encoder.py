@@ -551,11 +551,12 @@ def train_v2_e2e(args):
     print(f"  epsilon={args.epsilon:.4f} ({args.epsilon * 255:.1f}/255)")
     print(f"  LR={v2_lr:.2e} (base={args.lr:.2e} × factor={args.v2_lr_factor})")
     print(f"  EoT samples={args.eot_samples}, epochs={args.epochs}")
-    print(f"  semantic_mask={args.use_mask}, encoder={args.encoder_type}")
+    print(f"  semantic_mask={args.use_mask}, mask_floor={args.mask_floor}")
+    print(f"  encoder={args.encoder_type}")
     print(f"===========================\n")
 
     # Semantic mask
-    semantic_mask = SemanticMask() if args.use_mask else None
+    semantic_mask = SemanticMask(mask_floor=args.mask_floor) if args.use_mask else None
 
     # --- Load encoder ---
     encoder, image_size = create_encoder(args.encoder_type, args.epsilon, device)
@@ -753,6 +754,8 @@ if __name__ == "__main__":
     parser.add_argument("--v2-lr-factor", type=float, default=0.5,
                         help="LR multiplier for V2 E2E fine-tuning (default: 0.5)")
     parser.add_argument("--use-mask", action="store_true", help="Enable semantic face mask")
+    parser.add_argument("--mask-floor", type=float, default=0.05,
+                        help="Minimum mask value for skin regions (default: 0.05)")
 
     args = parser.parse_args()
 

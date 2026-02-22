@@ -120,10 +120,12 @@ class SemanticMask(nn.Module):
         mask_weights: Optional[Dict[str, float]] = None,
         use_bisenet: bool = True,
         blur_radius: int = 5,
+        mask_floor: float = 0.05,
     ):
         super().__init__()
         self.weights = mask_weights or DEFAULT_MASK_WEIGHTS
         self.blur_radius = blur_radius
+        self.mask_floor = mask_floor
 
         # Build weight lookup tensor
         weight_list = [0.0] * 19
@@ -220,7 +222,7 @@ class SemanticMask(nn.Module):
         mask = 0.6 * texture + 0.4 * edges
 
         # Apply minimum floor (allow at least some noise everywhere)
-        mask = mask.clamp(min=0.05, max=1.0)
+        mask = mask.clamp(min=self.mask_floor, max=1.0)
 
         # Smooth
         if self.blur_radius > 0:
