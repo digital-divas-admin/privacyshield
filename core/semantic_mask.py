@@ -164,6 +164,11 @@ class SemanticMask(nn.Module):
         if self._bisenet is None:
             return self._heuristic_mask(x)
 
+        # Ensure BiSeNet is on the same device as input
+        bisenet_device = next(self._bisenet.parameters()).device
+        if bisenet_device != x.device:
+            self._bisenet = self._bisenet.to(x.device)
+
         # BiSeNet expects 512x512 input
         x_resized = F.interpolate(x, size=(512, 512), mode="bilinear", align_corners=False)
 
