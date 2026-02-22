@@ -164,9 +164,10 @@ class SemanticMask(nn.Module):
         if self._bisenet is None:
             return self._heuristic_mask(x)
 
-        # Ensure BiSeNet is on the same device as input
-        bisenet_device = next(self._bisenet.parameters()).device
-        if bisenet_device != x.device:
+        # Ensure BiSeNet and weight_lut are on the same device as input
+        if self.weight_lut.device != x.device:
+            self.weight_lut = self.weight_lut.to(x.device)
+        if next(self._bisenet.parameters()).device != x.device:
             self._bisenet = self._bisenet.to(x.device)
 
         # BiSeNet expects 512x512 input
