@@ -264,10 +264,12 @@ class FaceEmbedder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (B, 3, 112, 112) aligned face tensor in [0, 1]
+            x: (B, 3, H, W) aligned face tensor in [0, 1] — auto-resized to 112x112
         Returns:
             (B, 512) L2-normalized embeddings
         """
+        if x.shape[-1] != 112 or x.shape[-2] != 112:
+            x = F.interpolate(x, size=112, mode="bilinear", align_corners=False)
         return self.backbone(x)
 
     @torch.no_grad()

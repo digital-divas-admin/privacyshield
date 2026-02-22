@@ -72,6 +72,13 @@ def checkpoint_prefix(encoder_type: str) -> str:
     return "vit_" if encoder_type == "vit" else ""
 
 
+def resize_for_arcface(x: torch.Tensor) -> torch.Tensor:
+    """Resize to 112x112 for ArcFace if needed (ViT uses 224x224)."""
+    if x.shape[-1] != 112 or x.shape[-2] != 112:
+        return F.interpolate(x, size=112, mode="bilinear", align_corners=False)
+    return x
+
+
 # ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
@@ -364,10 +371,11 @@ def _validate_distill(encoder, face_model, val_loader, device, criterion):
     with torch.no_grad():
         for batch in val_loader:
             batch = batch.to(device)
-            clean_emb = face_model(batch)
+            batch_112 = resize_for_arcface(batch)
+            clean_emb = face_model(batch_112)
             delta = encoder(batch)
             x_adv = (batch + delta).clamp(0, 1)
-            adv_emb = face_model(x_adv)
+            adv_emb = face_model(resize_for_arcface(x_adv))
             cos_sim = F.cosine_similarity(clean_emb, adv_emb, dim=1).mean()
             total_loss += cos_sim.item() * batch.shape[0]
             n += batch.shape[0]
@@ -424,14 +432,14 @@ def train_e2e(args):
 
                 # Get clean embeddings (frozen)
                 with torch.no_grad():
-                    clean_emb = face_model(clean)
+                    clean_emb = face_model(resize_for_arcface(clean))
 
                 # Generate perturbation
                 delta = encoder(clean)
                 x_adv = (clean + delta).clamp(0, 1)
 
                 # EoT loss: minimize cosine sim through transforms
-                cos_loss = eot(x_adv, clean_emb)
+                cos_loss = eot(resize_for_arcface(x_adv), clean_emb)
 
                 # Imperceptibility regularizer
                 reg = delta.abs().mean() * 10.0  # Keep perturbation small
@@ -484,10 +492,10 @@ def _validate_e2e(encoder, face_model, val_loader, device):
     with torch.no_grad():
         for batch in val_loader:
             batch = batch.to(device)
-            clean_emb = face_model(batch)
+            clean_emb = face_model(resize_for_arcface(batch))
             delta = encoder(batch)
             x_adv = (batch + delta).clamp(0, 1)
-            adv_emb = face_model(x_adv)
+            adv_emb = face_model(resize_for_arcface(x_adv))
             cos_sim = F.cosine_similarity(clean_emb, adv_emb, dim=1).mean()
             total_cos += cos_sim.item() * batch.shape[0]
             n += batch.shape[0]
@@ -588,7 +596,7 @@ def train_v2_e2e(args):
 
                 # Clean embeddings (frozen)
                 with torch.no_grad():
-                    clean_arcface = face_model(clean)
+                    clean_arcface = face_model(resize_for_arcface(clean))
                     clean_clip = clip_model(clean) if clip_model.is_available else None
 
                     # Compute semantic mask (no grad, fixed per batch)
@@ -681,13 +689,13 @@ def _validate_v2(encoder, face_model, val_loader, device, semantic_mask):
     with torch.no_grad():
         for batch in val_loader:
             batch = batch.to(device)
-            clean_emb = face_model(batch)
+            clean_emb = face_model(resize_for_arcface(batch))
             delta = encoder(batch)
             if semantic_mask is not None:
                 mask = semantic_mask(batch)
                 delta = delta * mask
             x_adv = (batch + delta).clamp(0, 1)
-            adv_emb = face_model(x_adv)
+            adv_emb = face_model(resize_for_arcface(x_adv))
             cos_sim = F.cosine_similarity(clean_emb, adv_emb, dim=1).mean()
             total_cos += cos_sim.item() * batch.shape[0]
             n += batch.shape[0]
