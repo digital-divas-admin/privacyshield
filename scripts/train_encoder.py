@@ -537,11 +537,22 @@ def train_v2_e2e(args):
         face_model=face_model,
         clip_model=clip_model if clip_model.is_available else None,
         lpips_loss=lpips_loss,
-        alpha_arcface=1.0,
-        beta_clip=0.5,
+        alpha_arcface=args.alpha_arcface,
+        beta_clip=args.beta_clip,
         lambda_lpips=args.lambda_lpips,
-        lambda_reg=0.01,
+        lambda_reg=args.lambda_reg,
     )
+
+    # Print loss config for verification
+    v2_lr = args.lr * args.v2_lr_factor
+    print(f"\n=== V2 E2E Loss Config ===")
+    print(f"  alpha_arcface={args.alpha_arcface}, beta_clip={args.beta_clip}")
+    print(f"  lambda_lpips={args.lambda_lpips}, lambda_reg={args.lambda_reg}")
+    print(f"  epsilon={args.epsilon:.4f} ({args.epsilon * 255:.1f}/255)")
+    print(f"  LR={v2_lr:.2e} (base={args.lr:.2e} × factor={args.v2_lr_factor})")
+    print(f"  EoT samples={args.eot_samples}, epochs={args.epochs}")
+    print(f"  semantic_mask={args.use_mask}, encoder={args.encoder_type}")
+    print(f"===========================\n")
 
     # Semantic mask
     semantic_mask = SemanticMask() if args.use_mask else None
@@ -553,7 +564,7 @@ def train_v2_e2e(args):
         encoder.load_state_dict(torch.load(args.checkpoint, map_location=device))
         print(f"Loaded encoder from {args.checkpoint}")
 
-    optimizer = torch.optim.AdamW(encoder.parameters(), lr=args.lr * 0.1)
+    optimizer = torch.optim.AdamW(encoder.parameters(), lr=args.lr * args.v2_lr_factor)
 
     # Scheduler — ViT gets linear warmup before cosine annealing
     if args.encoder_type == "vit":
@@ -736,6 +747,11 @@ if __name__ == "__main__":
                         help="Disable TensorBoard logging")
     # v2-specific
     parser.add_argument("--lambda-lpips", type=float, default=0.1, help="LPIPS penalty weight")
+    parser.add_argument("--alpha-arcface", type=float, default=1.0, help="ArcFace attack weight")
+    parser.add_argument("--beta-clip", type=float, default=0.5, help="CLIP attack weight")
+    parser.add_argument("--lambda-reg", type=float, default=0.01, help="L1 regularization weight")
+    parser.add_argument("--v2-lr-factor", type=float, default=0.5,
+                        help="LR multiplier for V2 E2E fine-tuning (default: 0.5)")
     parser.add_argument("--use-mask", action="store_true", help="Enable semantic face mask")
 
     args = parser.parse_args()

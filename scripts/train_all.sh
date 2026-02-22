@@ -41,14 +41,16 @@ python scripts/train_encoder.py --phase distill \
     --epochs "$EPOCHS" --checkpoint-dir "$CKPT_DIR"
 echo "U-Net distill done: $(date)"
 
-# Phase 2: U-Net v2 E2E
+# Phase 2: U-Net v2 E2E (aggressive loss tuning — Run 2)
 echo ""
 echo "=== Phase 2a: U-Net V2 E2E ==="
 python scripts/train_encoder.py --phase v2_e2e \
     --encoder-type unet --data-dir "$DATA_DIR" \
     --checkpoint "$CKPT_DIR/distill_best.pt" \
-    --use-mask --epochs 20 --checkpoint-dir "$CKPT_DIR" \
-    --batch-size 2 --eot-samples 3
+    --use-mask --epochs 30 --checkpoint-dir "$CKPT_DIR" \
+    --batch-size 2 --eot-samples 5 --epsilon 0.0627 \
+    --alpha-arcface 10.0 --beta-clip 5.0 \
+    --lambda-lpips 0.01 --lambda-reg 0.001
 echo "U-Net v2_e2e done: $(date)"
 
 # Phase 3: ViT distill
@@ -59,14 +61,16 @@ python scripts/train_encoder.py --phase distill \
     --epochs "$EPOCHS" --checkpoint-dir "$CKPT_DIR"
 echo "ViT distill done: $(date)"
 
-# Phase 4: ViT v2 E2E
+# Phase 4: ViT v2 E2E (aggressive loss tuning — Run 2)
 echo ""
 echo "=== Phase 2b: ViT V2 E2E ==="
 python scripts/train_encoder.py --phase v2_e2e \
     --encoder-type vit --data-dir "$DATA_DIR" \
     --checkpoint "$CKPT_DIR/vit_distill_best.pt" \
-    --use-mask --epochs 20 --checkpoint-dir "$CKPT_DIR" \
-    --batch-size 2 --eot-samples 3
+    --use-mask --epochs 30 --checkpoint-dir "$CKPT_DIR" \
+    --batch-size 2 --eot-samples 5 --epsilon 0.0627 \
+    --alpha-arcface 10.0 --beta-clip 5.0 \
+    --lambda-lpips 0.01 --lambda-reg 0.001
 echo "ViT v2_e2e done: $(date)"
 
 echo ""
