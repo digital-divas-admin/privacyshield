@@ -156,21 +156,6 @@ class ContextPath(nn.Module):
         return feat8, feat16_up, feat32_up
 
 
-class SpatialPath(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = ConvBNReLU(3, 64, ks=7, stride=2, padding=3)
-        self.conv2 = ConvBNReLU(64, 64, ks=3, stride=2, padding=1)
-        self.conv3 = ConvBNReLU(64, 64, ks=3, stride=2, padding=1)
-        self.conv_out = ConvBNReLU(64, 128, ks=1, stride=1, padding=0)
-
-    def forward(self, x):
-        feat = self.conv1(x)
-        feat = self.conv2(feat)
-        feat = self.conv3(feat)
-        return self.conv_out(feat)
-
-
 class FeatureFusionModule(nn.Module):
     def __init__(self, in_chan, out_chan):
         super().__init__()
@@ -194,7 +179,7 @@ class BiSeNet(nn.Module):
     def __init__(self, n_classes=19):
         super().__init__()
         self.cp = ContextPath()
-        self.sp = SpatialPath()
+        # No SpatialPath — checkpoint uses feat_res8 (ResNet layer2) directly
         self.ffm = FeatureFusionModule(256, 256)
         self.conv_out = BiSeNetOutput(256, 256, n_classes)
         self.conv_out16 = BiSeNetOutput(128, 64, n_classes)
@@ -203,8 +188,7 @@ class BiSeNet(nn.Module):
     def forward(self, x):
         H, W = x.size()[2:]
         feat_res8, feat_cp8, feat_cp16 = self.cp(x)
-        feat_sp = self.sp(x)
-        feat_fuse = self.ffm(feat_sp, feat_cp8)
+        feat_fuse = self.ffm(feat_res8, feat_cp8)
 
         feat_out = self.conv_out(feat_fuse)
         feat_out16 = self.conv_out16(feat_cp8)
