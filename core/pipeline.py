@@ -65,6 +65,9 @@ class PipelineConfig:
     adaface_weights: Optional[str] = None
     ensemble_weights: Optional[Dict[str, float]] = None
 
+    # BiSeNet face parsing
+    bisenet_weights: Optional[str] = None
+
     # Logging
     verbose: bool = True
 
@@ -154,8 +157,12 @@ class ProtectionPipeline:
         # 7. Semantic mask
         if cfg.use_semantic_mask and cfg.mask_mode != "off":
             weights = STEALTH_MASK_WEIGHTS if cfg.mask_mode == "stealth" else DEFAULT_MASK_WEIGHTS
-            self.semantic_mask = SemanticMask(mask_weights=weights)
-            print(f"Semantic mask: {cfg.mask_mode} mode")
+            self.semantic_mask = SemanticMask(
+                mask_weights=weights,
+                bisenet_weights=cfg.bisenet_weights,
+            )
+            mask_backend = "BiSeNet" if self.semantic_mask._bisenet is not None else "heuristic"
+            print(f"Semantic mask: {cfg.mask_mode} mode ({mask_backend})")
         else:
             self.semantic_mask = None
 

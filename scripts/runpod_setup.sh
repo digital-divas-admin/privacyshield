@@ -38,6 +38,22 @@ if [ ! -f weights/arcface_r100.pth ]; then
     exit 1
 fi
 
+# Download BiSeNet face parsing weights
+echo ""
+echo "=== Downloading BiSeNet face parsing weights ==="
+if [ ! -f weights/bisenet_face.pth ]; then
+    python -c "
+from huggingface_hub import hf_hub_download
+import os
+hf_hub_download('vivym/face-parsing-bisenet', '79999_iter.pth',
+                local_dir='./weights', local_dir_use_symlinks=False)
+os.rename('./weights/79999_iter.pth', './weights/bisenet_face.pth')
+print('BiSeNet weights downloaded')
+"
+else
+    echo "BiSeNet weights already present"
+fi
+
 # Download data
 echo ""
 echo "=== Downloading FFHQ ==="

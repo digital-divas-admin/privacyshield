@@ -121,6 +121,7 @@ class SemanticMask(nn.Module):
         use_bisenet: bool = True,
         blur_radius: int = 5,
         mask_floor: float = 0.05,
+        bisenet_weights: Optional[str] = None,
     ):
         super().__init__()
         self.weights = mask_weights or DEFAULT_MASK_WEIGHTS
@@ -136,15 +137,18 @@ class SemanticMask(nn.Module):
         self._bisenet = None
         self._use_bisenet = use_bisenet
 
+        # Auto-load BiSeNet if weights path provided
+        if bisenet_weights and use_bisenet:
+            self.load_bisenet(bisenet_weights)
+
     def load_bisenet(self, model_path: str, device: str = None):
         """Load BiSeNet face parsing model."""
         try:
-            # BiSeNet loading — expects a standard PyTorch checkpoint
-            from torchvision.models.segmentation import deeplabv3_resnet50
-            # Placeholder: in production, load the actual BiSeNet model
-            # self._bisenet = BiSeNet(n_classes=19)
-            # self._bisenet.load_state_dict(torch.load(model_path))
-            # self._bisenet.to(device).eval()
+            from .bisenet import load_bisenet as _load_bisenet
+            if device is None:
+                device = str(self.weight_lut.device)
+            self._bisenet = _load_bisenet(model_path, device=device)
+            self._use_bisenet = True
             print(f"BiSeNet loaded from {model_path}")
         except Exception as e:
             print(f"BiSeNet load failed: {e}. Using heuristic mask.")
@@ -168,9 +172,9 @@ class SemanticMask(nn.Module):
         std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
         x_norm = (x_resized - mean) / std
 
-        # Get segmentation
-        logits = self._bisenet(x_norm)
-        labels = logits.argmax(dim=1)  # (B, 512, 512)
+        # Get segmentation (BiSeNet returns tuple: out, out16, out32)
+        out, _, _ = self._bisenet(x_norm)
+        labels = out.argmax(dim=1)  # (B, 512, 512)
 
         # Map labels to weights
         mask = self.weight_lut[labels]  # (B, 512, 512)
@@ -178,6 +182,9 @@ class SemanticMask(nn.Module):
 
         # Resize back to original
         mask = F.interpolate(mask, size=(x.shape[2], x.shape[3]), mode="bilinear", align_corners=False)
+
+        # Apply minimum floor
+        mask = mask.clamp(min=self.mask_floor, max=1.0)
 
         # Smooth edges
         if self.blur_radius > 0:

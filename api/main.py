@@ -224,6 +224,10 @@ async def lifespan(app: FastAPI):
             os.path.dirname(os.path.dirname(__file__)),
             config.ensemble.adaface_weights,
         )
+        bisenet_weights_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "weights", "bisenet_face.pth",
+        )
         pipe_cfg = PipelineConfig(
             epsilon=config.attack.epsilon,
             num_steps=config.attack.num_steps,
@@ -231,6 +235,7 @@ async def lifespan(app: FastAPI):
             use_semantic_mask=True,
             mask_mode="default",
             adaface_weights=adaface_weights_path if os.path.exists(adaface_weights_path) else None,
+            bisenet_weights=bisenet_weights_path if os.path.exists(bisenet_weights_path) else None,
             ensemble_weights={
                 "arcface": config.ensemble.weight_arcface,
                 "facenet": config.ensemble.weight_facenet,
