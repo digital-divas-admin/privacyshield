@@ -59,20 +59,20 @@ FACE_PARTS = {
 # 0.0 = no perturbation allowed, 1.0 = full perturbation
 DEFAULT_MASK_WEIGHTS: Dict[str, float] = {
     "background": 1.0,   # Full noise — not visible as face
-    "skin":       0.05,  # Nearly zero — keep pristine
-    "l_brow":     0.9,   # High-frequency texture, good place for noise
-    "r_brow":     0.9,
-    "l_eye":      0.7,   # Identity-critical, textured enough
-    "r_eye":      0.7,
-    "eye_g":      0.8,   # Eyeglasses — textured
-    "l_ear":      0.6,
-    "r_ear":      0.6,
+    "skin":       0.9,   # High — LPIPS constrains artifacts
+    "l_brow":     1.0,   # High-frequency texture, good place for noise
+    "r_brow":     1.0,
+    "l_eye":      0.9,   # Identity-critical, textured enough
+    "r_eye":      0.9,
+    "eye_g":      0.9,   # Eyeglasses — textured
+    "l_ear":      0.8,
+    "r_ear":      0.8,
     "ear_r":      1.0,   # Earring — tiny, textured
-    "nose":       0.15,  # Moderate — some smooth skin
-    "mouth":      0.3,   # Lips have some texture
-    "u_lip":      0.4,
-    "l_lip":      0.4,
-    "neck":       0.1,   # Smooth skin
+    "nose":       0.7,   # Identity-critical geometry
+    "mouth":      0.7,   # Lips have some texture
+    "u_lip":      0.8,
+    "l_lip":      0.8,
+    "neck":       0.6,   # Smooth but needs signal
     "necklace":   1.0,   # Textured accessory
     "cloth":      1.0,   # Textured, high-frequency
     "hair":       1.0,   # Maximum noise — naturally hides perturbation

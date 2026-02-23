@@ -598,6 +598,9 @@ async def health():
     if registry.ensemble_model is not None:
         ensemble_models = registry.ensemble_model.active_model_names
 
+    has_encoder = registry.noise_encoder is not None or registry.vit_encoder is not None
+    hybrid_available = registry.pipeline_v2 is not None and has_encoder
+
     dfr = registry.deepfake_registry
     return HealthResponse(
         status="ok",
@@ -606,6 +609,7 @@ async def health():
         encoder_loaded=registry.noise_encoder is not None,
         vit_encoder_loaded=registry.vit_encoder is not None,
         pipeline_v2_loaded=registry.pipeline_v2 is not None,
+        hybrid_mode_available=hybrid_available,
         facenet_loaded=facenet_loaded,
         adaface_loaded=adaface_loaded,
         ensemble_models=ensemble_models,
@@ -623,23 +627,68 @@ async def protect_image(
     step_size: Optional[float] = Form(None),
     eot_samples: int = Form(10),
     mask_mode: str = Form("default"),
+    refine_steps: int = Form(10),
 ):
     """
     Protect a face image against recognition.
 
     Modes:
-      - pgd:      Classic PGD attack (slow, reliable)
-      - encoder:  U-Net single-pass (fast, requires training)
-      - vit:      ViT single-pass (fast, requires training)
-      - v2:       Full pipeline with LPIPS + CLIP + semantic mask
-      - v2_full:  Full-image mode with differentiable alignment
-      - aspl:     Alternating surrogate attack
+      - pgd:              Classic PGD attack (slow, reliable)
+      - encoder:          U-Net single-pass (fast, requires training)
+      - vit:              ViT single-pass (fast, requires training)
+      - v2:               Full pipeline with LPIPS + CLIP + semantic mask
+      - v2_full:          Full-image mode with differentiable alignment
+      - encoder_refined:  Hybrid encoder seed + PGD refinement (~1-2s)
+      - aspl:             Alternating surrogate attack
     """
     if registry.face_model is None:
         raise HTTPException(503, "Face model not loaded")
 
     start_time = time.time()
     image_bytes = await image.read()
+
+    # --- Hybrid encoder + PGD refinement mode ---
+    if mode == "encoder_refined":
+        if registry.pipeline_v2 is None:
+            raise HTTPException(503, "v2 pipeline not initialized (needed for hybrid refinement)")
+
+        encoder = registry.vit_encoder or registry.noise_encoder
+        if encoder is None:
+            raise HTTPException(503, "No encoder available. Train a U-Net or ViT encoder first.")
+
+        # Configure pipeline for refinement
+        registry.pipeline_v2.config.epsilon = epsilon
+        registry.pipeline_v2.config.step_size = epsilon / 4
+        registry.pipeline_v2.config.eot_samples = eot_samples
+        registry.pipeline_v2.config.mask_mode = mask_mode
+        registry.pipeline_v2.config.verbose = False
+
+        x = load_image_tensor(image_bytes)
+        x_protected, info = registry.pipeline_v2.protect_hybrid(x, encoder, refine_steps=refine_steps)
+
+        elapsed_ms = (time.time() - start_time) * 1000
+        png_bytes = tensor_to_png_bytes(x_protected)
+
+        headers = {
+            "X-Privacy-Mode": mode,
+            "X-ArcFace-Cos-Sim": f"{info.get('arcface_cos_sim', 0):.4f}",
+            "X-CLIP-Cos-Sim": f"{info.get('clip_cos_sim', 0):.4f}",
+            "X-LPIPS": f"{info.get('lpips', 0):.4f}",
+            "X-PSNR": f"{info.get('psnr', 0):.1f}",
+            "X-Delta-Linf": f"{info.get('delta_linf', 0):.4f}",
+            "X-Processing-Ms": f"{elapsed_ms:.0f}",
+        }
+
+        per_model = info.get("per_model_similarity", {})
+        if per_model:
+            import json
+            headers["X-Per-Model-Similarity"] = json.dumps(per_model)
+
+        return StreamingResponse(
+            io.BytesIO(png_bytes),
+            media_type="image/png",
+            headers=headers,
+        )
 
     # --- v2 pipeline modes ---
     if mode in ("v2", "v2_full"):
@@ -811,6 +860,7 @@ async def protect_batch(
     steps: int = Form(50),
     eot_samples: int = Form(10),
     mask_mode: str = Form("default"),
+    refine_steps: int = Form(10),
 ):
     """
     Protect multiple face images. Returns base64-encoded protected images + metrics.
@@ -825,7 +875,39 @@ async def protect_batch(
         try:
             image_bytes = await upload.read()
 
-            if mode in ("v2", "v2_full"):
+            if mode == "encoder_refined":
+                if registry.pipeline_v2 is None:
+                    raise Exception("v2 pipeline not initialized (needed for hybrid refinement)")
+                encoder = registry.vit_encoder or registry.noise_encoder
+                if encoder is None:
+                    raise Exception("No encoder available")
+
+                registry.pipeline_v2.config.epsilon = epsilon
+                registry.pipeline_v2.config.step_size = epsilon / 4
+                registry.pipeline_v2.config.eot_samples = eot_samples
+                registry.pipeline_v2.config.mask_mode = mask_mode
+                registry.pipeline_v2.config.verbose = False
+
+                x = load_image_tensor(image_bytes)
+                x_protected, info = registry.pipeline_v2.protect_hybrid(x, encoder, refine_steps=refine_steps)
+
+                elapsed_ms = (time.time() - start_time) * 1000
+                png_bytes = tensor_to_png_bytes(x_protected)
+
+                results.append(BatchProtectResult(
+                    index=i,
+                    success=True,
+                    protected_image_b64=base64.b64encode(png_bytes).decode(),
+                    mode=mode,
+                    arcface_cos_sim=info.get("arcface_cos_sim", 0),
+                    clip_cos_sim=info.get("clip_cos_sim", 0),
+                    lpips=info.get("lpips", 0),
+                    psnr=info.get("psnr", 0),
+                    delta_linf=info.get("delta_linf", 0),
+                    processing_time_ms=elapsed_ms,
+                ))
+
+            elif mode in ("v2", "v2_full"):
                 if registry.pipeline_v2 is None:
                     raise Exception("v2 pipeline not initialized")
 

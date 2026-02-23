@@ -364,7 +364,201 @@ class ProtectionPipeline:
             print(f"  CLIP cos sim:     {cos_clip:.4f}")
             print(f"  LPIPS:            {lpips_final:.4f}")
             print(f"  PSNR:             {final_metrics['psnr']:.1f} dB")
-            print(f"  δ L∞:             {final_metrics['delta_linf']:.4f}")
+            print(f"  Delta L-inf:      {final_metrics['delta_linf']:.4f}")
+            print(f"{'=' * 60}")
+
+        return x_protected.detach(), final_metrics
+
+    def protect_hybrid(
+        self,
+        x: torch.Tensor,
+        encoder: nn.Module,
+        refine_steps: int = 10,
+        callback: Optional[Callable] = None,
+    ) -> Tuple[torch.Tensor, Dict]:
+        """
+        Hybrid mode: encoder gives initial perturbation, then PGD refines it.
+
+        Faster than full PGD (encoder seed + few steps) but better quality
+        than pure encoder (full loss stack with LPIPS + CLIP + mask + EoT).
+
+        Args:
+            x: (B, 3, 112, 112) aligned face in [0, 1]
+            encoder: trained NoiseEncoder or ViT encoder
+            refine_steps: number of PGD refinement iterations
+            callback: optional fn(step, x_adv, metrics) per iteration
+
+        Returns:
+            x_protected: (B, 3, 112, 112) protected image
+            metrics: dict with loss history and final measurements
+        """
+        assert self._ready, "Call .setup() first"
+        cfg = self.config
+        device = x.device
+        x = x.detach().clone()
+        start_time = time.time()
+
+        # Pre-compute clean embeddings (frozen targets)
+        has_ensemble = len(self.ensemble_model.active_model_names) > 1
+        with torch.no_grad():
+            if has_ensemble:
+                clean_arcface = self.ensemble_model.get_all_clean_embeddings(x)
+            else:
+                clean_arcface = self.face_model(x)
+            clean_clip = None
+            if self.clip_model.is_available:
+                clean_clip = self.clip_model(x)
+
+        # Pre-compute semantic mask
+        mask = None
+        if self.semantic_mask is not None:
+            with torch.no_grad():
+                mask = self.semantic_mask(x)  # (B, 1, H, W)
+
+        # --- Encoder seed ---
+        with torch.no_grad():
+            delta_init = encoder(x)  # Already in [-eps, eps]
+            if mask is not None:
+                delta_init = delta_init * mask
+            # Clamp to valid image range
+            delta_init = (x + delta_init).clamp(0.0, 1.0) - x
+
+        delta = delta_init.clone()
+        delta.requires_grad_(True)
+
+        history = {
+            "loss": [], "arcface_cos": [], "clip_cos": [], "lpips": [],
+        }
+
+        iterator = range(refine_steps)
+        if cfg.verbose:
+            iterator = tqdm(iterator, desc="Hybrid refine", leave=False)
+
+        for step in iterator:
+            # Apply mask to delta before constructing adversarial image
+            if mask is not None:
+                delta_masked = delta * mask
+            else:
+                delta_masked = delta
+
+            x_adv = (x + delta_masked).clamp(0.0, 1.0)
+
+            # --- EoT-averaged loss ---
+            total_loss = torch.tensor(0.0, device=device)
+            step_metrics = {}
+
+            for t in range(cfg.eot_samples):
+                x_t = self.eot.apply_random_transform(x_adv)
+                loss_t, metrics_t = self.loss_fn(x, x_t, clean_arcface, clean_clip)
+                total_loss = total_loss + loss_t
+
+                if t == cfg.eot_samples - 1:
+                    step_metrics = metrics_t
+
+            avg_loss = total_loss / cfg.eot_samples
+
+            # Backward
+            avg_loss.backward()
+
+            with torch.no_grad():
+                grad = delta.grad.detach()
+
+                # Sign gradient descent (minimize loss = maximize distance)
+                delta.data -= cfg.step_size * grad.sign()
+
+                # Project onto epsilon-ball
+                delta.data = delta.data.clamp(-cfg.epsilon, cfg.epsilon)
+
+                # Apply mask to projected delta
+                if mask is not None:
+                    delta.data = delta.data * mask
+
+                # Project onto valid image range
+                delta.data = (x + delta.data).clamp(0.0, 1.0) - x
+
+                # Log
+                history["loss"].append(avg_loss.item())
+                history["arcface_cos"].append(step_metrics.get("arcface_cos_sim", 0))
+                history["clip_cos"].append(step_metrics.get("clip_cos_sim", 0))
+                history["lpips"].append(step_metrics.get("lpips", 0))
+
+                if cfg.verbose and hasattr(iterator, "set_postfix"):
+                    iterator.set_postfix(
+                        loss=f"{avg_loss.item():.3f}",
+                        arc=f"{step_metrics.get('arcface_cos_sim', 0):.3f}",
+                        clip=f"{step_metrics.get('clip_cos_sim', 0):.3f}",
+                        lpips=f"{step_metrics.get('lpips', 0):.4f}",
+                    )
+
+                if callback:
+                    callback(step, (x + delta.data * (mask if mask is not None else 1)).clamp(0, 1), step_metrics)
+
+            delta.grad.zero_()
+
+        # --- Final protected image ---
+        if mask is not None:
+            x_protected = (x + delta.data * mask).clamp(0.0, 1.0)
+        else:
+            x_protected = (x + delta.data).clamp(0.0, 1.0)
+
+        # --- Final evaluation ---
+        elapsed = time.time() - start_time
+
+        with torch.no_grad():
+            clean_arcface_emb = clean_arcface["arcface"] if isinstance(clean_arcface, dict) else clean_arcface
+            final_arcface = self.face_model(x_protected)
+            cos_clean = F.cosine_similarity(clean_arcface_emb, final_arcface, dim=1).mean().item()
+
+            robust_emb = self.eot.get_transformed_embedding(x_protected, num_avg=30)
+            cos_robust = F.cosine_similarity(clean_arcface_emb, robust_emb, dim=1).mean().item()
+
+            per_model_sim = {}
+            if has_ensemble:
+                all_clean = clean_arcface if isinstance(clean_arcface, dict) else {"arcface": clean_arcface}
+                for name in self.ensemble_model.active_model_names:
+                    if name in all_clean:
+                        model = self.ensemble_model._models[name]
+                        adv_emb = model(x_protected)
+                        sim = F.cosine_similarity(all_clean[name], adv_emb, dim=1).mean().item()
+                        per_model_sim[name] = sim
+
+            cos_clip = 0.0
+            if self.clip_model.is_available and clean_clip is not None:
+                final_clip = self.clip_model(x_protected)
+                if final_clip is not None:
+                    cos_clip = F.cosine_similarity(clean_clip, final_clip, dim=1).mean().item()
+
+            lpips_final = self.lpips_loss(x, x_protected).item()
+            delta_final = x_protected - x
+
+        final_metrics = {
+            "arcface_cos_sim": cos_clean,
+            "arcface_cos_sim_robust": cos_robust,
+            "clip_cos_sim": cos_clip,
+            "lpips": lpips_final,
+            "delta_linf": delta_final.abs().max().item(),
+            "delta_l2": delta_final.norm(p=2).item(),
+            "psnr": (10 * torch.log10(1.0 / (delta_final ** 2).mean())).item(),
+            "processing_time_s": elapsed,
+            "num_steps": refine_steps,
+            "history": history,
+        }
+        if per_model_sim:
+            final_metrics["per_model_similarity"] = per_model_sim
+
+        if cfg.verbose:
+            print(f"\n{'=' * 60}")
+            print(f"  Hybrid Protection Complete ({elapsed:.1f}s)")
+            print(f"  Encoder seed + {refine_steps} PGD refinement steps")
+            print(f"  ArcFace cos sim:  {cos_clean:.4f} (robust: {cos_robust:.4f})")
+            if per_model_sim:
+                for name, sim in per_model_sim.items():
+                    if name != "arcface":
+                        print(f"  {name.capitalize()} cos sim: {sim:.4f}")
+            print(f"  CLIP cos sim:     {cos_clip:.4f}")
+            print(f"  LPIPS:            {lpips_final:.4f}")
+            print(f"  PSNR:             {final_metrics['psnr']:.1f} dB")
+            print(f"  Delta L-inf:      {final_metrics['delta_linf']:.4f}")
             print(f"{'=' * 60}")
 
         return x_protected.detach(), final_metrics

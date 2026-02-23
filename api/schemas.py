@@ -12,6 +12,7 @@ class ProtectMode(str, Enum):
     ASPL = "aspl"
     V2 = "v2"
     V2_FULL = "v2_full"
+    ENCODER_REFINED = "encoder_refined"
 
 
 class ProtectRequest(BaseModel):
@@ -47,6 +48,7 @@ class HealthResponse(BaseModel):
     facenet_loaded: bool = False
     adaface_loaded: bool = False
     ensemble_models: List[str] = Field(default_factory=list, description="Active ensemble model names")
+    hybrid_mode_available: bool = False
     inswapper_loaded: bool = False
     ipadapter_loaded: bool = False
 

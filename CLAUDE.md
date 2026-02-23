@@ -16,7 +16,7 @@ recognition systems (ArcFace, CLIP) and deepfake pipelines (Roop, IP-Adapter).
 - `core/face_model.py` — ArcFace IResNet-100 wrapper + FaceNet/AdaFace ensemble
 - `core/adaface_backbone.py` — AdaFace IR-101 backbone for ensemble
 - `core/deepfake_test.py` — Deepfake tool testing (inswapper + IP-Adapter FaceID Plus v2)
-- `api/main.py` — FastAPI backend (modes: pgd, encoder, vit, v2, v2_full)
+- `api/main.py` — FastAPI backend (modes: pgd, encoder, vit, v2, v2_full, encoder_refined)
 - `scripts/train_encoder.py` — 4-phase training (generate → distill → e2e → v2_e2e), U-Net + ViT
 - `scripts/prepare_data.py` — Download FFHQ from HuggingFace, resize, train/val split
 - `scripts/runpod_setup.sh` — Cloud GPU setup (install deps, download data, verify weights)
@@ -121,7 +121,7 @@ target_image (optional), run_inswapper, run_ipadapter, prompt, threshold.
 
 ## Key technical decisions
 - All transforms are differentiable (grid_sample for alignment, DiffJPEG with STE)
-- Semantic mask concentrates perturbation in textured regions (hair, eyebrows)
+- Semantic mask (BiSeNet) allows high perturbation everywhere (skin=0.9) — LPIPS constrains artifacts
 - LPIPS prevents visible artifacts even at full ε budget
 - CLIP dual-targeting blinds IP-Adapter FaceID Plus v2's style channel
 - ViT-S/8 encoder is the production inference path (~170ms per image)
@@ -135,6 +135,7 @@ target_image (optional), run_inswapper, run_ipadapter, prompt, threshold.
 - `vit` — ViT single-pass (fast, ~170ms, requires training)
 - `v2` — Full pipeline: PGD + LPIPS + CLIP + semantic mask on aligned face
 - `v2_full` — Full pipeline on full-size image with differentiable alignment
+- `encoder_refined` — Hybrid: encoder initial delta + N PGD refinement steps (~2-4s)
 
 ## Deepfake testing internals
 - `core/deepfake_test.py` contains `DeepfakeTestRegistry` with lazy-loaded models
@@ -151,10 +152,18 @@ target_image (optional), run_inswapper, run_ipadapter, prompt, threshold.
 - Deepfake testing verified: both inswapper and IP-Adapter defeated by PGD protection
   - Inswapper: clean cos_sim=0.94, protected cos_sim=-0.01 → PROTECTED
   - IP-Adapter: clean cos_sim=-0.01, protected cos_sim=0.10 → PROTECTED
-- Needs: training data (CelebA/VGGFace2), GPU training run for encoder modes
+- Encoder training complete (5k FFHQ subset, RunPod RTX 4090)
+  - U-Net checkpoint: `checkpoints/best.pt` (218MB)
+  - ViT checkpoint: `checkpoints/vit_best.pt` (87MB)
+  - BiSeNet face parser: `weights/bisenet_face.pth` (53MB)
+- Hybrid mode (encoder_refined) tested and tuned:
+  - Hybrid 10 steps: ArcFace=-0.01, robust=0.18, LPIPS=0.12, PSNR=34.4, ~2.3s
+  - Hybrid 20 steps: ArcFace=-0.13, robust=0.01, LPIPS=0.11, PSNR=34.2, ~4.0s
+  - vs original PGD 50: ArcFace=-0.52, LPIPS=0.16, PSNR=32, ~10s
+  - Hybrid is 4x faster with better visual quality at comparable protection
 
 ## What to build next
-- Run encoder training on GPU cloud (5k subset first, then full 70k)
+- Train on full 70k FFHQ (current checkpoints from 5k subset)
 - Test with real-world face photos (not padded crops) for more representative metrics
 - Add InstantID testing to deepfake test registry
 - Build React demo frontend with before/after slider
