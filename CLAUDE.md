@@ -7,7 +7,7 @@ recognition systems (ArcFace, CLIP) and deepfake pipelines (Roop, IP-Adapter).
 - `core/pipeline.py` — Unified attack orchestrator (start here)
 - `core/attacks.py` — PGD + ASPL iterative attacks
 - `core/losses.py` — Unified loss: ArcFace + CLIP dual-targeting + LPIPS
-- `core/diff_align.py` — Differentiable face alignment via grid_sample
+- `core/diff_align.py` — Differentiable face alignment via grid_sample + inverse grid for full-image hybrid
 - `core/semantic_mask.py` — Face parsing mask (noise in hair/brows, not skin)
 - `core/eot.py` — Expectation over Transformation (JPEG/resize/blur robustness)
 - `core/diff_jpeg.py` — Differentiable JPEG with STE
@@ -128,6 +128,13 @@ target_image (optional), run_inswapper, run_ipadapter, prompt, threshold.
 - EoT averages gradients over random JPEG/resize/blur for social media robustness
 - Cross-model ensemble (ArcFace + FaceNet + AdaFace) improves transferability
 - Deepfake models are lazy-loaded on first use (not at startup) to avoid heavy memory cost
+- Hybrid full-image mode: encoder seed is blurred (sigma=4) and scaled to 0.5x before
+  inverse-warping to full-image space, then blended with random noise everywhere via soft
+  feathered mask (sigma=20). PGD refinement uses normalized gradient (not sign()) for smooth
+  noise. This eliminates the visible face-region boundary that naive encoder seeding creates.
+- Inverse grid (build_inverse_grid in DifferentiableAligner) maps full-image pixels to aligned
+  face coordinates, enabling grid_sample to scatter aligned-space encoder deltas back to
+  full-image space with natural zero-padding outside the face region
 
 ## API modes
 - `pgd` — Iterative PGD attack (slow, best quality, ~5-10s)
@@ -135,7 +142,8 @@ target_image (optional), run_inswapper, run_ipadapter, prompt, threshold.
 - `vit` — ViT single-pass (fast, ~170ms, requires training)
 - `v2` — Full pipeline: PGD + LPIPS + CLIP + semantic mask on aligned face
 - `v2_full` — Full pipeline on full-size image with differentiable alignment
-- `encoder_refined` — Hybrid: encoder initial delta + N PGD refinement steps (~2-4s)
+- `encoder_refined` — Hybrid: encoder seed + PGD refinement. Auto-detects full-size images
+  and uses full-image pipeline with normalized gradient for near-invisible noise (~4s)
 
 ## Deepfake testing internals
 - `core/deepfake_test.py` contains `DeepfakeTestRegistry` with lazy-loaded models
@@ -157,13 +165,13 @@ target_image (optional), run_inswapper, run_ipadapter, prompt, threshold.
   - ViT checkpoint: `checkpoints/vit_best.pt` (87MB)
   - BiSeNet face parser: `weights/bisenet_face.pth` (53MB)
 - Hybrid mode (encoder_refined) tested and tuned:
-  - Hybrid 10 steps: ArcFace=-0.01, robust=0.18, LPIPS=0.12, PSNR=34.4, ~2.3s
-  - Hybrid 20 steps: ArcFace=-0.13, robust=0.01, LPIPS=0.11, PSNR=34.2, ~4.0s
+  - Hybrid aligned: ArcFace=-0.01, robust=0.18, LPIPS=0.12, PSNR=34.4, ~2.3s
+  - Hybrid full-image: ArcFace=-0.34, FaceNet=-0.29, AdaFace=-0.09, ~4.1s
+  - vs v2_full 50 steps: ~48s — hybrid full is 12x faster with near-invisible noise
   - vs original PGD 50: ArcFace=-0.52, LPIPS=0.16, PSNR=32, ~10s
-  - Hybrid is 4x faster with better visual quality at comparable protection
+- Frontend fully wired: encoder_refined mode with refine_steps slider, 3-column
+  results view (Original aligned / Protected / Zoomed comparison), dynamic mask mode
 
 ## What to build next
 - Train on full 70k FFHQ (current checkpoints from 5k subset)
-- Test with real-world face photos (not padded crops) for more representative metrics
 - Add InstantID testing to deepfake test registry
-- Build React demo frontend with before/after slider

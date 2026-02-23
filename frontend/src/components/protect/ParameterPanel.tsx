@@ -64,6 +64,27 @@ export function ParameterPanel({ params, onChange }: ParameterPanelProps) {
         />
       </div>
 
+      {/* Refine Steps (hybrid mode only) */}
+      {params.mode === "encoder_refined" && (
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <label className="text-sm font-medium">Refinement Steps</label>
+            <span className="text-xs font-mono text-muted-foreground">{params.refine_steps ?? 10}</span>
+          </div>
+          <Slider
+            min={5}
+            max={50}
+            step={5}
+            value={[params.refine_steps ?? 10]}
+            onValueChange={([v]) => set("refine_steps", v)}
+          />
+          <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+            <span>Fast (~2s)</span>
+            <span>Strong (~4s)</span>
+          </div>
+        </div>
+      )}
+
       {/* Mask mode */}
       <div>
         <label className="mb-2 block text-sm font-medium">Semantic Mask</label>

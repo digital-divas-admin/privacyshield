@@ -35,6 +35,9 @@ export async function protectImage(
   form.append("steps", String(params.steps));
   form.append("eot_samples", String(params.eot_samples));
   form.append("mask_mode", params.mask_mode);
+  if (params.refine_steps !== undefined) {
+    form.append("refine_steps", String(params.refine_steps));
+  }
 
   const res = await fetch(`${API_URL}/protect`, { method: "POST", body: form });
   if (!res.ok) {
@@ -49,7 +52,7 @@ export async function protectImage(
   const h = (name: string) => parseFloat(res.headers.get(name) || "0");
 
   const mode = res.headers.get("X-Privacy-Mode") || params.mode;
-  const isV2 = mode.startsWith("v2");
+  const isV2 = mode.startsWith("v2") || mode === "encoder_refined";
 
   // Parse per-model similarity JSON header
   let perModelSimilarity: Record<string, number> | undefined;
@@ -75,7 +78,18 @@ export async function protectImage(
     perModelSimilarity,
   };
 
-  return { protectedImageBlob: blob, protectedImageUrl: url, metrics };
+  // Decode aligned original face (base64 PNG) for apples-to-apples comparison
+  let originalAlignedUrl: string | undefined;
+  const alignedB64 = res.headers.get("X-Original-Aligned");
+  if (alignedB64) {
+    const bin = atob(alignedB64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const alignedBlob = new Blob([bytes], { type: "image/png" });
+    originalAlignedUrl = URL.createObjectURL(alignedBlob);
+  }
+
+  return { protectedImageBlob: blob, protectedImageUrl: url, originalAlignedUrl, metrics };
 }
 
 // ---------------------------------------------------------------------------

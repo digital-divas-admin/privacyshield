@@ -89,7 +89,12 @@ export default function ProtectPage() {
               <p className="mb-2 text-sm font-medium">Mode</p>
               <ModeSelector
                 value={params.mode}
-                onChange={(mode: ProtectMode) => setParams((p) => ({ ...p, mode }))}
+                onChange={(mode: ProtectMode) => setParams((p) => ({
+                  ...p,
+                  mode,
+                  refine_steps: mode === "encoder_refined" ? (p.refine_steps ?? 10) : undefined,
+                  eot_samples: mode === "encoder_refined" ? 2 : (p.mode === "encoder_refined" ? 10 : p.eot_samples),
+                }))}
                 health={health}
               />
             </div>
@@ -122,21 +127,53 @@ export default function ProtectPage() {
               <Separator />
               <MetricsPanel metrics={result.metrics} />
               <Separator />
-              <div className="grid gap-4 md:grid-cols-2">
-                <div>
-                  <p className="mb-2 text-sm font-medium">Before / After</p>
-                  <BeforeAfterSlider
-                    beforeSrc={previewUrl}
-                    afterSrc={result.protectedImageUrl}
-                  />
-                </div>
-                <div>
-                  <PerturbationViewer
-                    originalSrc={previewUrl}
-                    protectedSrc={result.protectedImageUrl}
-                  />
-                </div>
-              </div>
+              {(() => {
+                const origSrc = result.originalAlignedUrl || previewUrl;
+                return (
+                  <>
+                    <div className="grid gap-4 grid-cols-3">
+                      <div>
+                        <p className="mb-2 text-sm font-medium">Original</p>
+                        <div className="overflow-hidden rounded-lg border border-border">
+                          <img
+                            src={origSrc}
+                            alt="Original"
+                            className="w-full h-auto"
+                            draggable={false}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <p className="mb-2 text-sm font-medium">Protected</p>
+                        <div className="overflow-hidden rounded-lg border border-border">
+                          <img
+                            src={result.protectedImageUrl}
+                            alt="Protected"
+                            className="w-full h-auto"
+                            draggable={false}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <p className="mb-2 text-sm font-medium">Zoomed Comparison</p>
+                        <BeforeAfterSlider
+                          beforeSrc={origSrc}
+                          afterSrc={result.protectedImageUrl}
+                          zoom={2.5}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid gap-4 grid-cols-3">
+                      <div>
+                        <PerturbationViewer
+                          originalSrc={origSrc}
+                          protectedSrc={result.protectedImageUrl}
+                        />
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
               <div className="flex gap-2">
                 <a href={result.protectedImageUrl} download="protected.png">
                   <Button variant="outline">

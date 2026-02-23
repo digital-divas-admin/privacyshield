@@ -286,6 +286,7 @@ app.add_middleware(
         "X-Privacy-Mode", "X-ArcFace-Cos-Sim", "X-CLIP-Cos-Sim",
         "X-LPIPS", "X-PSNR", "X-Delta-Linf", "X-Processing-Ms",
         "X-Cosine-Sim", "X-Robust-Cosine-Sim", "X-Per-Model-Similarity",
+        "X-Original-Aligned",
     ],
 )
 
@@ -663,8 +664,28 @@ async def protect_image(
         registry.pipeline_v2.config.mask_mode = mask_mode
         registry.pipeline_v2.config.verbose = False
 
-        x = load_image_tensor(image_bytes)
-        x_protected, info = registry.pipeline_v2.protect_hybrid(x, encoder, refine_steps=refine_steps)
+        # Auto-detect full-size images vs pre-aligned crops
+        import cv2
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            raise HTTPException(400, "Could not decode image")
+
+        is_full_image = max(img_bgr.shape[:2]) > 200
+
+        if is_full_image:
+            # Full-image hybrid: encoder seed + normalized gradient refinement
+            # Produces smooth, near-invisible noise like v2_full but much faster
+            x_protected, info = registry.pipeline_v2.protect_hybrid_full(
+                img_bgr, encoder, refine_steps=refine_steps,
+            )
+            if x_protected is None:
+                raise HTTPException(422, info.get("error", "Protection failed"))
+            x_original_aligned = None
+        else:
+            x = load_image_tensor(image_bytes)
+            x_original_aligned = x.clone()
+            x_protected, info = registry.pipeline_v2.protect_hybrid(x, encoder, refine_steps=refine_steps)
 
         elapsed_ms = (time.time() - start_time) * 1000
         png_bytes = tensor_to_png_bytes(x_protected)
@@ -683,6 +704,11 @@ async def protect_image(
         if per_model:
             import json
             headers["X-Per-Model-Similarity"] = json.dumps(per_model)
+
+        # Include clean aligned face for apples-to-apples comparison (aligned mode only)
+        if x_original_aligned is not None:
+            original_png = tensor_to_png_bytes(x_original_aligned)
+            headers["X-Original-Aligned"] = base64.b64encode(original_png).decode()
 
         return StreamingResponse(
             io.BytesIO(png_bytes),
@@ -703,6 +729,7 @@ async def protect_image(
         registry.pipeline_v2.config.mask_mode = mask_mode
         registry.pipeline_v2.config.verbose = False
 
+        x_original_aligned = None
         if mode == "v2_full":
             import cv2
             nparr = np.frombuffer(image_bytes, np.uint8)
@@ -715,6 +742,7 @@ async def protect_image(
                 raise HTTPException(422, info.get("error", "Protection failed"))
         else:
             x = load_image_tensor(image_bytes)
+            x_original_aligned = x.clone()
             x_protected, info = registry.pipeline_v2.protect_aligned(x)
 
         elapsed_ms = (time.time() - start_time) * 1000
@@ -736,6 +764,11 @@ async def protect_image(
             import json
             headers["X-Per-Model-Similarity"] = json.dumps(per_model)
 
+        # Include clean aligned face for apples-to-apples comparison
+        if x_original_aligned is not None:
+            original_png = tensor_to_png_bytes(x_original_aligned)
+            headers["X-Original-Aligned"] = base64.b64encode(original_png).decode()
+
         return StreamingResponse(
             io.BytesIO(png_bytes),
             media_type="image/png",
@@ -744,6 +777,7 @@ async def protect_image(
 
     # --- Legacy modes ---
     x = load_image_tensor(image_bytes)
+    x_original_aligned = x.clone()
 
     # Run protection
     if mode in ("encoder", "vit"):
@@ -808,6 +842,10 @@ async def protect_image(
         "X-Delta-Linf": f"{info['delta_linf']:.4f}",
         "X-Processing-Ms": f"{elapsed_ms:.0f}",
     }
+
+    # Include clean aligned face for apples-to-apples comparison
+    original_png = tensor_to_png_bytes(x_original_aligned)
+    headers["X-Original-Aligned"] = base64.b64encode(original_png).decode()
 
     return StreamingResponse(
         io.BytesIO(png_bytes),

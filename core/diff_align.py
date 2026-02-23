@@ -208,6 +208,50 @@ class DifferentiableAligner(nn.Module):
         )
         return grid
 
+    def build_inverse_grid(
+        self,
+        landmarks: np.ndarray,
+        src_size: Tuple[int, int],
+        device=None,
+    ) -> torch.Tensor:
+        """
+        Build an inverse grid: maps full-image pixels → aligned face pixels.
+
+        Used with grid_sample(aligned_tensor, inv_grid, padding_mode='zeros')
+        to scatter aligned-space data back to full-image space.
+        Pixels outside the face region map outside [-1,1] and get zero padding.
+
+        Args:
+            landmarks: (5, 2) facial landmarks
+            src_size: (H, W) of the source (full) image
+        Returns:
+            inv_grid: (1, src_H, src_W, 2) for grid_sample
+        """
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        M = _estimate_affine(landmarks, self.dst_pts)
+        src_h, src_w = src_size
+        dst_h, dst_w = self.output_size, self.output_size
+
+        gy, gx = torch.meshgrid(
+            torch.arange(src_h, dtype=torch.float32, device=device),
+            torch.arange(src_w, dtype=torch.float32, device=device),
+            indexing="ij",
+        )
+        ones = torch.ones_like(gx)
+        src_coords = torch.stack([gx, gy, ones], dim=-1)  # (H, W, 3)
+
+        # Forward affine: src pixel → aligned face coordinate
+        M_t = torch.from_numpy(M).float().to(device)  # (2, 3)
+        dst_coords = torch.einsum("ij,hwj->hwi", M_t, src_coords)  # (H, W, 2)
+
+        # Normalize to [-1, 1] for grid_sample over the aligned face
+        dst_coords[..., 0] = 2.0 * dst_coords[..., 0] / (dst_w - 1) - 1.0
+        dst_coords[..., 1] = 2.0 * dst_coords[..., 1] / (dst_h - 1) - 1.0
+
+        return dst_coords.unsqueeze(0)  # (1, src_H, src_W, 2)
+
     def warp(self, image_tensor: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
         """
         Apply differentiable affine warp using grid_sample.

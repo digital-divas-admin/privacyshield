@@ -2,7 +2,7 @@
 // API types matching backend schemas
 // ---------------------------------------------------------------------------
 
-export type ProtectMode = "pgd" | "encoder" | "vit" | "v2" | "v2_full" | "aspl";
+export type ProtectMode = "pgd" | "encoder" | "vit" | "v2" | "v2_full" | "aspl" | "encoder_refined";
 
 export interface ProtectParams {
   mode: ProtectMode;
@@ -10,6 +10,7 @@ export interface ProtectParams {
   steps: number;
   eot_samples: number;
   mask_mode: string;
+  refine_steps?: number;
 }
 
 export interface ProtectionMetrics {
@@ -30,6 +31,7 @@ export interface ProtectionMetrics {
 export interface ProtectionResult {
   protectedImageBlob: Blob;
   protectedImageUrl: string;
+  originalAlignedUrl?: string;
   metrics: ProtectionMetrics;
 }
 
@@ -104,6 +106,7 @@ export interface HealthStatus {
   encoder_loaded: boolean;
   vit_encoder_loaded: boolean;
   pipeline_v2_loaded: boolean;
+  hybrid_mode_available: boolean;
   facenet_loaded: boolean;
   adaface_loaded: boolean;
   ensemble_models: string[];

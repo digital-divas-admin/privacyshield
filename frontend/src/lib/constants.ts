@@ -13,6 +13,7 @@ export const PROTECT_MODES: {
   { value: "v2_full", label: "V2 Full Image", description: "Full pipeline on full-size image with differentiable alignment", speed: "~10-20s" },
   { value: "encoder", label: "U-Net Encoder", description: "Single-pass encoder (requires training)", speed: "~50ms" },
   { value: "vit", label: "ViT Encoder", description: "ViT-S/8 single-pass (requires training)", speed: "~170ms" },
+  { value: "encoder_refined", label: "Hybrid (Recommended)", description: "Encoder + PGD refinement — best speed/quality tradeoff", speed: "~2-4s" },
 ];
 
 export const EPSILON_PRESETS = [

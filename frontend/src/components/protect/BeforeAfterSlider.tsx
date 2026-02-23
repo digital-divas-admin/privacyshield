@@ -7,6 +7,7 @@ interface BeforeAfterSliderProps {
   afterSrc: string;
   beforeLabel?: string;
   afterLabel?: string;
+  zoom?: number;
 }
 
 export function BeforeAfterSlider({
@@ -14,6 +15,7 @@ export function BeforeAfterSlider({
   afterSrc,
   beforeLabel = "Original",
   afterLabel = "Protected",
+  zoom = 1,
 }: BeforeAfterSliderProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState(50);
@@ -46,6 +48,14 @@ export function BeforeAfterSlider({
     setDragging(false);
   }, []);
 
+  // For zoom > 1, we scale up and offset to center
+  const imgStyle: React.CSSProperties = zoom > 1
+    ? {
+        transform: `scale(${zoom})`,
+        transformOrigin: "center center",
+      }
+    : {};
+
   return (
     <div
       ref={containerRef}
@@ -59,6 +69,7 @@ export function BeforeAfterSlider({
         src={afterSrc}
         alt={afterLabel}
         className="absolute inset-0 h-full w-full object-cover"
+        style={imgStyle}
         draggable={false}
       />
 
@@ -71,6 +82,7 @@ export function BeforeAfterSlider({
           src={beforeSrc}
           alt={beforeLabel}
           className="absolute inset-0 h-full w-full object-cover"
+          style={imgStyle}
           draggable={false}
         />
       </div>

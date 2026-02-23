@@ -170,7 +170,32 @@ class ProtectionPipeline:
         self.aligner = DifferentiableAligner(output_size=112)
 
         self._ready = True
+        self._current_mask_mode = cfg.mask_mode
         print("Pipeline ready!")
+
+    def _update_mask_mode(self):
+        """Re-create semantic mask if mask_mode changed since last call."""
+        from .semantic_mask import SemanticMask, DEFAULT_MASK_WEIGHTS, STEALTH_MASK_WEIGHTS
+
+        cfg = self.config
+        mode = cfg.mask_mode
+
+        # Map frontend names to internal names
+        mode_map = {"hair_only": "stealth", "none": "off"}
+        mode = mode_map.get(mode, mode)
+
+        if mode == "off" or not cfg.use_semantic_mask:
+            self.semantic_mask = None
+            self._current_mask_mode = mode
+            return
+
+        if mode != getattr(self, "_current_mask_mode", None):
+            weights = STEALTH_MASK_WEIGHTS if mode == "stealth" else DEFAULT_MASK_WEIGHTS
+            self.semantic_mask = SemanticMask(
+                mask_weights=weights,
+                bisenet_weights=cfg.bisenet_weights,
+            )
+            self._current_mask_mode = mode
 
     def protect_aligned(
         self,
@@ -190,6 +215,7 @@ class ProtectionPipeline:
         """
         assert self._ready, "Call .setup() first"
         cfg = self.config
+        self._update_mask_mode()
         device = x.device
         x = x.detach().clone()
         start_time = time.time()
@@ -394,6 +420,7 @@ class ProtectionPipeline:
         """
         assert self._ready, "Call .setup() first"
         cfg = self.config
+        self._update_mask_mode()
         device = x.device
         x = x.detach().clone()
         start_time = time.time()
@@ -562,6 +589,221 @@ class ProtectionPipeline:
             print(f"{'=' * 60}")
 
         return x_protected.detach(), final_metrics
+
+    def protect_hybrid_full(
+        self,
+        image_bgr: np.ndarray,
+        encoder: nn.Module,
+        refine_steps: int = 10,
+    ) -> Tuple[Optional[torch.Tensor], Dict]:
+        """
+        Hybrid full-image mode: encoder seeds the aligned crop, inverse-warps
+        the delta to full-image space, then PGD refines with normalized gradient.
+
+        Combines hybrid speed with v2_full visual quality:
+        - Encoder provides a smart initial perturbation (skip ~40 PGD steps)
+        - Normalized gradient (not sign) produces smooth, near-invisible noise
+        - Full-image space means perturbation is spread across full resolution
+        - Grid_sample warp naturally restricts gradients to the face region
+
+        Args:
+            image_bgr: (H, W, 3) BGR numpy image
+            encoder: trained NoiseEncoder or ViT encoder
+            refine_steps: number of PGD refinement iterations
+        Returns:
+            x_protected: (1, 3, H, W) full-size protected image, or None
+            metrics: dict
+        """
+        assert self._ready, "Call .setup() first"
+        cfg = self.config
+
+        # Detect landmarks (non-differentiable, done once)
+        landmarks = self.aligner.detect_landmarks(image_bgr)
+        if landmarks is None:
+            return None, {"error": "No face detected"}
+
+        # Convert to tensor
+        import cv2
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        x = torch.from_numpy(image_rgb).float().permute(2, 0, 1) / 255.0
+        x = x.unsqueeze(0).to(self.device)
+
+        # Build forward grid (full → aligned) and inverse grid (aligned → full)
+        grid = self.aligner.build_grid(
+            landmarks,
+            src_size=(x.shape[2], x.shape[3]),
+            device=self.device,
+        )
+        inv_grid = self.aligner.build_inverse_grid(
+            landmarks,
+            src_size=(x.shape[2], x.shape[3]),
+            device=self.device,
+        )
+
+        # Pre-compute clean embeddings through differentiable warp
+        has_ensemble = len(self.ensemble_model.active_model_names) > 1
+        with torch.no_grad():
+            aligned_clean = self.aligner.warp(x, grid)
+            if has_ensemble:
+                clean_embs_all = self.ensemble_model.get_all_clean_embeddings(aligned_clean)
+            clean_arcface = self.face_model(aligned_clean)
+            clean_clip = None
+            if self.clip_model.is_available:
+                clean_clip = self.clip_model(aligned_clean)
+
+        # --- Encoder seed: smooth directional hint + random noise everywhere ---
+        with torch.no_grad():
+            delta_aligned = encoder(aligned_clean)  # (1, 3, 112, 112) in [-eps, eps]
+
+            # Blur the encoder delta at 112x112 BEFORE inverse warping.
+            # The encoder produces structured, correlated noise that looks different
+            # from natural noise. Blurring converts it to a smooth directional bias
+            # that guides PGD without creating visible texture artifacts.
+            blur_s = 4.0
+            blur_ks = int(blur_s * 6) | 1
+            blur_ax = torch.arange(blur_ks, dtype=torch.float32, device=self.device) - blur_ks // 2
+            blur_g = torch.exp(-0.5 * (blur_ax / blur_s) ** 2)
+            blur_k1d = blur_g / blur_g.sum()
+            blur_k2d = blur_k1d.outer(blur_k1d).view(1, 1, blur_ks, blur_ks).expand(3, -1, -1, -1)
+            delta_aligned = F.conv2d(delta_aligned, blur_k2d, padding=blur_ks // 2, groups=3)
+
+            # Scale down encoder contribution — it provides direction, PGD adds detail
+            delta_aligned = delta_aligned * 0.5
+
+            # Inverse warp: scatter smoothed delta back to full-image space
+            delta_encoder = F.grid_sample(
+                delta_aligned, inv_grid,
+                mode='bilinear', padding_mode='zeros', align_corners=True,
+            )
+
+            # Soft face region mask for seamless blending
+            ones_aligned = torch.ones(1, 1, 112, 112, device=self.device)
+            face_mask = F.grid_sample(
+                ones_aligned, inv_grid,
+                mode='bilinear', padding_mode='zeros', align_corners=True,
+            )
+            sigma = 20.0
+            ks = int(sigma * 6) | 1
+            ax = torch.arange(ks, dtype=torch.float32, device=self.device) - ks // 2
+            gauss = torch.exp(-0.5 * (ax / sigma) ** 2)
+            k1d = gauss / gauss.sum()
+            k2d = k1d.outer(k1d).view(1, 1, ks, ks)
+            soft_mask = F.conv2d(face_mask, k2d, padding=ks // 2).clamp(0, 1)
+
+            # Random noise everywhere (same magnitude — no visible boundary)
+            delta_random = torch.empty_like(x).uniform_(-cfg.epsilon, cfg.epsilon)
+
+            # Blend: smooth encoder hint in face, random noise in background
+            delta_full_init = soft_mask * delta_encoder + (1 - soft_mask) * delta_random
+            delta_full_init = delta_full_init.clamp(-cfg.epsilon, cfg.epsilon)
+            delta_full_init = (x + delta_full_init).clamp(0.0, 1.0) - x
+
+        delta = delta_full_init.clone()
+        delta.requires_grad_(True)
+
+        eot_n = cfg.eot_samples
+        start_time = time.time()
+
+        if cfg.verbose:
+            print(f"  protect_hybrid_full: eps={cfg.epsilon:.4f}, refine_steps={refine_steps}, "
+                  f"eot={eot_n}, image={x.shape}")
+
+        iterator = range(refine_steps)
+        if cfg.verbose:
+            iterator = tqdm(iterator, desc="Hybrid full refine", leave=False)
+
+        for step in iterator:
+            x_adv = (x + delta).clamp(0.0, 1.0)
+
+            # Differentiable warp → aligned face
+            aligned_adv = self.aligner.warp(x_adv, grid)
+
+            # EoT-averaged identity + CLIP loss
+            # (skip LPIPS — grid_sample sparsity handles quality in full-image mode)
+            total_loss = torch.tensor(0.0, device=self.device)
+            for _ in range(eot_n):
+                x_t = self.eot.apply_random_transform(aligned_adv)
+                if has_ensemble:
+                    ens_loss, _ = self.ensemble_model.ensemble_cosine_loss(clean_embs_all, x_t)
+                    sample_loss = ens_loss
+                else:
+                    adv_emb = self.face_model(x_t)
+                    cos_sim = F.cosine_similarity(clean_arcface, adv_emb, dim=1).mean()
+                    sample_loss = cos_sim
+                if self.clip_model.is_available and clean_clip is not None:
+                    adv_clip = self.clip_model(x_t)
+                    if adv_clip is not None:
+                        clip_cos = F.cosine_similarity(clean_clip, adv_clip, dim=1).mean()
+                        sample_loss = sample_loss + cfg.beta_clip * clip_cos
+                total_loss = total_loss + sample_loss
+
+            avg_loss = total_loss / eot_n
+            avg_loss.backward()
+
+            if delta.grad is None:
+                if cfg.verbose:
+                    print(f"  [WARN] Step {step}: delta.grad is None!")
+                break
+
+            with torch.no_grad():
+                # Normalized gradient (same as protect_full) for smooth noise
+                grad = delta.grad
+                grad_norm = grad.norm()
+                if grad_norm > 1e-10:
+                    normalized_grad = grad / grad_norm * grad.numel() ** 0.5
+                    delta.data -= cfg.step_size * normalized_grad
+                else:
+                    delta.data -= cfg.step_size * grad.sign()
+
+                delta.data = delta.data.clamp(-cfg.epsilon, cfg.epsilon)
+                delta.data = (x + delta.data).clamp(0.0, 1.0) - x
+
+                if cfg.verbose and (step == 0 or step == refine_steps - 1 or step % 5 == 0):
+                    test_adv = (x + delta.data).clamp(0, 1)
+                    test_aligned = self.aligner.warp(test_adv, grid)
+                    test_emb = self.face_model(test_aligned)
+                    cur_cos = F.cosine_similarity(clean_arcface, test_emb, dim=1).mean().item()
+                    print(f"  Step {step}: loss={avg_loss.item():.4f}, "
+                          f"cos_sim={cur_cos:.4f}, "
+                          f"delta_linf={delta.data.abs().max().item():.4f}")
+
+            delta.grad.zero_()
+
+        # Final: apply delta
+        x_protected = (x + delta.data).clamp(0.0, 1.0)
+        elapsed = time.time() - start_time
+
+        with torch.no_grad():
+            aligned_prot = self.aligner.warp(x_protected, grid)
+            prot_emb = self.face_model(aligned_prot)
+            cos_sim = F.cosine_similarity(clean_arcface, prot_emb, dim=1).mean().item()
+
+            per_model_sim = {}
+            if has_ensemble:
+                for name in self.ensemble_model.active_model_names:
+                    if name in clean_embs_all:
+                        model = self.ensemble_model._models[name]
+                        adv_emb = model(aligned_prot)
+                        sim = F.cosine_similarity(clean_embs_all[name], adv_emb, dim=1).mean().item()
+                        per_model_sim[name] = sim
+
+        delta_final = x_protected - x
+        metrics = {
+            "arcface_cos_sim": cos_sim,
+            "delta_linf": delta_final.abs().max().item(),
+            "processing_time_s": elapsed,
+        }
+        if per_model_sim:
+            metrics["per_model_similarity"] = per_model_sim
+
+        if cfg.verbose:
+            print(f"\nHybrid full-image protection: cos_sim={cos_sim:.4f}, time={elapsed:.1f}s")
+            if per_model_sim:
+                for name, sim in per_model_sim.items():
+                    if name != "arcface":
+                        print(f"  {name}: cos_sim={sim:.4f}")
+
+        return x_protected.detach(), metrics
 
     def protect_full(
         self,

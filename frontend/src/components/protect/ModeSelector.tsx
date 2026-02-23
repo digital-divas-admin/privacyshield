@@ -24,6 +24,8 @@ function isModeAvailable(mode: ProtectMode, health: HealthStatus | null): boolea
     case "v2":
     case "v2_full":
       return health.pipeline_v2_loaded;
+    case "encoder_refined":
+      return health.hybrid_mode_available;
     default:
       return false;
   }
